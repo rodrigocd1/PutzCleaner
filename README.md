@@ -113,6 +113,23 @@ ou depois), mas também aumentam o risco de cortar fala vizinha. As margens são
 limitadas a valores entre 0 e 2 segundos. A proteção das palavras vizinhas
 impede que a margem invada uma palavra legítima adjacente.
 
+## Confiança mínima
+
+Cada palavra reconhecida vem com uma confiança (0 a 1). Só são removidas as
+palavras-alvo com confiança **acima do limiar**. O campo **Confiança mínima**
+controla isso:
+
+- Valor **menor** (ex.: `0,4` ou `0,3`): remove mais vícios de fala, inclusive
+  os que o modelo reconheceu com menos certeza — bom quando "né"/"hum" rápidos
+  estão escapando. Aumenta o risco de falsos cortes.
+- Valor **maior** (ex.: `0,6`, o padrão original): mais conservador, corta
+  menos por engano, mas pode deixar passar vícios ditos rapidamente.
+
+Se um vício aparece na transcrição **sem** `[removida]`, quase sempre é porque
+a confiança dele ficou abaixo do limiar. O relatório JSON lista o motivo
+(`baixa_confianca`) e a confiança exata de cada ocorrência ignorada, ajudando
+você a calibrar o valor.
+
 ## Onde os arquivos são salvos
 
 Por padrão, na mesma pasta do vídeo de entrada. Se você escolher uma pasta de

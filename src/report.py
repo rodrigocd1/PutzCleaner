@@ -40,6 +40,7 @@ def build_report(
     device_used: str = "cpu",
     margin_before: float,
     margin_after: float,
+    min_probability: float = 0.60,
     faster_whisper_version: str,
     ffmpeg_version: str,
     warnings: list[str] | None = None,
@@ -113,7 +114,7 @@ def build_report(
             "idioma": "pt",
             "margem_antes": _round(margin_before),
             "margem_depois": _round(margin_after),
-            "limiar_confianca": 0.6,
+            "limiar_confianca": _round(min_probability),
             "distancia_uniao": 0.12,
         },
         "midia": {

@@ -208,7 +208,9 @@ def _clamp_interval(
     return (start, end)
 
 
-def _confidence_reason(token: WordToken) -> str | None:
+def _confidence_reason(
+    token: WordToken, min_probability: float = MIN_WORD_PROBABILITY
+) -> str | None:
     """Aplica o critério de confiança (seção 15). None significa aprovado.
 
     Não avalia sobreposição com palavra protegida (item 12) nem margens;
@@ -219,7 +221,7 @@ def _confidence_reason(token: WordToken) -> str | None:
         return REASON_PROB_MISSING
     if token.start is None or token.end is None:
         return REASON_TS_MISSING
-    if token.probability < MIN_WORD_PROBABILITY:
+    if token.probability < min_probability:
         return REASON_LOW_CONFIDENCE
     if token.end <= token.start:
         return REASON_DURATION_INVALID
@@ -254,6 +256,7 @@ def build_cut_plan(
     timeline_duration: float,
     margin_before: float,
     margin_after: float,
+    min_probability: float = MIN_WORD_PROBABILITY,
 ) -> CutPlan:
     """Constrói o plano de cortes seguro (seção 16)."""
 
@@ -267,6 +270,9 @@ def build_cut_plan(
         0.0 <= ma <= MAX_MARGIN_SEC
     ):
         raise CutterError("Margens inválidas; use valores entre 0 e 2 segundos.")
+    minp = _sanitize_float(min_probability)
+    if minp is None or not (0.0 <= minp <= 1.0):
+        raise CutterError("Limiar de confiança inválido; use um valor entre 0 e 1.")
 
     targets: set[str] = set()
     for term in configured_terms:
@@ -312,7 +318,7 @@ def build_cut_plan(
         if not is_target:
             protected.append((vt.start, vt.end))
             continue
-        reason = _confidence_reason(vt.token)
+        reason = _confidence_reason(vt.token, minp)
         if reason is None:
             candidate_targets.append(vt)
         else:

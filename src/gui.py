@@ -52,6 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dispositivo": "auto",
     "margem_antes": 0.05,
     "margem_depois": 0.08,
+    "limiar_confianca": 0.60,
     "pasta_saida": "",
 }
 
@@ -70,6 +71,7 @@ class ProcessingOptions:
     device: str
     margin_before: float
     margin_after: float
+    min_probability: float
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +143,16 @@ def load_config(project_root: Path) -> tuple[dict[str, Any], list[str], bool]:
         except (TypeError, ValueError):
             warnings.append(f"{chave} inválida; usando {padrao}.")
 
+    # limiar de confiança
+    limiar = data.get("limiar_confianca")
+    try:
+        flimiar = float(limiar)
+        if not (0.0 <= flimiar <= 1.0):
+            raise ValueError
+        config["limiar_confianca"] = flimiar
+    except (TypeError, ValueError):
+        warnings.append("limiar_confianca inválido; usando 0.60.")
+
     # pasta_saida
     pasta = data.get("pasta_saida", "")
     if isinstance(pasta, str):
@@ -162,6 +174,7 @@ def save_config(project_root: Path, config: dict[str, Any]) -> None:
         "dispositivo": config.get("dispositivo", "auto"),
         "margem_antes": float(config["margem_antes"]),
         "margem_depois": float(config["margem_depois"]),
+        "limiar_confianca": float(config.get("limiar_confianca", 0.60)),
         "pasta_saida": config.get("pasta_saida", ""),
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
@@ -336,6 +349,7 @@ def run_worker(
             media_info.timeline_duration,
             options.margin_before,
             options.margin_after,
+            options.min_probability,
         )
         log(
             f"{len(plan.occurrences)} ocorrência(s) aceita(s), "
@@ -380,6 +394,7 @@ def run_worker(
             device_used=result.device_used,
             margin_before=options.margin_before,
             margin_after=options.margin_after,
+            min_probability=options.min_probability,
             faster_whisper_version=_faster_whisper_version(),
             ffmpeg_version=toolchain.ffmpeg_version,
         )
@@ -631,7 +646,18 @@ class PutzCleanerApp:
         )
         r += 1
 
-        # Dica sobre o dispositivo (GPU exige NVIDIA + CUDA/cuDNN).
+        opts2 = ttk.Frame(frame)
+        opts2.grid(row=r, column=0, sticky="ew", pady=(0, 2))
+        ttk.Label(opts2, text="Confiança mínima (0-1):").grid(
+            row=0, column=0, padx=(0, 4)
+        )
+        self.confidence_var = tk.StringVar()
+        ttk.Entry(opts2, textvariable=self.confidence_var, width=8).grid(
+            row=0, column=1
+        )
+        r += 1
+
+        # Dicas.
         device_hint = ttk.Label(
             frame,
             text=(
@@ -641,6 +667,16 @@ class PutzCleanerApp:
             foreground="gray",
         )
         device_hint.grid(row=r, column=0, sticky="w")
+        r += 1
+        confidence_hint = ttk.Label(
+            frame,
+            text=(
+                "Confiança mínima: menor (ex.: 0,4) remove mais vícios de fala "
+                "duvidosos; maior (ex.: 0,6) é mais seguro contra falsos cortes."
+            ),
+            foreground="gray",
+        )
+        confidence_hint.grid(row=r, column=0, sticky="w")
         r += 1
 
         # Botão principal
@@ -683,6 +719,7 @@ class PutzCleanerApp:
         self.device_var.set(self.config.get("dispositivo", "auto"))
         self.margin_before_var.set(str(self.config["margem_antes"]))
         self.margin_after_var.set(str(self.config["margem_depois"]))
+        self.confidence_var.set(str(self.config.get("limiar_confianca", 0.60)))
         pasta = self.config.get("pasta_saida", "")
         if pasta:
             self.output_var.set(pasta)
@@ -723,6 +760,7 @@ class PutzCleanerApp:
         self.config["dispositivo"] = options.device
         self.config["margem_antes"] = options.margin_before
         self.config["margem_depois"] = options.margin_after
+        self.config["limiar_confianca"] = options.min_probability
         self.config["pasta_saida"] = (
             "" if self.output_var.get() == "Mesma pasta do vídeo"
             else str(options.output_directory)
@@ -784,6 +822,15 @@ class PutzCleanerApp:
             if not (0.0 <= margin <= MAX_MARGIN_SEC):
                 raise ValueError("As margens devem estar entre 0 e 2 segundos.")
 
+        try:
+            min_probability = parse_decimal(self.confidence_var.get())
+        except ValueError as exc:
+            raise ValueError(
+                "Confiança mínima inválida. Use um número entre 0 e 1 (ex.: 0,5)."
+            ) from exc
+        if not (0.0 <= min_probability <= 1.0):
+            raise ValueError("A confiança mínima deve estar entre 0 e 1.")
+
         output_text = self.output_var.get().strip()
         if not output_text or output_text == "Mesma pasta do vídeo":
             output_directory = input_path.parent
@@ -798,6 +845,7 @@ class PutzCleanerApp:
             device=device,
             margin_before=margin_before,
             margin_after=margin_after,
+            min_probability=min_probability,
         )
 
     # ---- Fila de eventos ----
