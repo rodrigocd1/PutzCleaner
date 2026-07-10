@@ -1,0 +1,11 @@
+# Ambiente e artefatos operacionais gerados pelo setup/programa
+.venv/
+models/
+tools/
+
+# Bytecode e caches Python
+__pycache__/
+*.pyc
+
+# Arquivos temporários do PutzCleaner
+.putzcleaner-*

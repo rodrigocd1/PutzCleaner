@@ -1,0 +1,17 @@
+{
+  "palavras_removidas": [
+    "né",
+    "neh",
+    "eee",
+    "ééé",
+    "ã",
+    "hã",
+    "hum",
+    "tipo",
+    "assim"
+  ],
+  "modelo_padrao": "small",
+  "margem_antes": 0.05,
+  "margem_depois": 0.08,
+  "pasta_saida": ""
+}
