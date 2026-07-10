@@ -9,3 +9,7 @@ __pycache__/
 
 # Arquivos temporários do PutzCleaner
 .putzcleaner-*
+
+# Logs de execução do setup
+setup_run.log
+*.log

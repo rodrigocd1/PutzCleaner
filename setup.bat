@@ -173,66 +173,91 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem where /r retorna apenas arquivos existentes (for /r com nome literal nao).
 set "SRCFFMPEG="
 set "SRCFFPROBE="
-for /r "%TMPDIR%\extract" %%F in (ffmpeg.exe) do if not defined SRCFFMPEG set "SRCFFMPEG=%%F"
-for /r "%TMPDIR%\extract" %%F in (ffprobe.exe) do if not defined SRCFFPROBE set "SRCFFPROBE=%%F"
+for /f "delims=" %%F in ('where /r "%TMPDIR%\extract" ffmpeg.exe 2^>nul') do if not defined SRCFFMPEG set "SRCFFMPEG=%%F"
+for /f "delims=" %%F in ('where /r "%TMPDIR%\extract" ffprobe.exe 2^>nul') do if not defined SRCFFPROBE set "SRCFFPROBE=%%F"
 if not defined SRCFFMPEG (
     echo ffmpeg.exe nao encontrado no pacote.
-    call :cleanup_temp
+    call :cleanup_ff
     exit /b 1
 )
 if not defined SRCFFPROBE (
     echo ffprobe.exe nao encontrado no pacote.
-    call :cleanup_temp
+    call :cleanup_ff
     exit /b 1
 )
 
 mkdir "%STAGEDIR%\bin"
 copy /Y "%SRCFFMPEG%" "%STAGEDIR%\bin\ffmpeg.exe" >nul
+if errorlevel 1 (
+    echo Falha ao copiar ffmpeg.exe do pacote.
+    call :cleanup_ff
+    exit /b 1
+)
 copy /Y "%SRCFFPROBE%" "%STAGEDIR%\bin\ffprobe.exe" >nul
+if errorlevel 1 (
+    echo Falha ao copiar ffprobe.exe do pacote.
+    call :cleanup_ff
+    exit /b 1
+)
 
 echo Validando FFmpeg baixado...
 "%STAGEDIR%\bin\ffmpeg.exe" -hide_banner -encoders 2>nul | findstr /C:"libx264" >nul
 if errorlevel 1 (
     echo Encoder libx264 ausente no FFmpeg baixado.
-    call :cleanup_temp
+    call :cleanup_ff
     exit /b 1
 )
 "%STAGEDIR%\bin\ffmpeg.exe" -hide_banner -encoders 2>nul | findstr /R /C:" aac " >nul
 if errorlevel 1 (
     echo Encoder aac ausente no FFmpeg baixado.
-    call :cleanup_temp
+    call :cleanup_ff
     exit /b 1
 )
 "%STAGEDIR%\bin\ffprobe.exe" -version >nul 2>&1
 if errorlevel 1 (
     echo ffprobe baixado nao funcionou.
-    call :cleanup_temp
+    call :cleanup_ff
     exit /b 1
 )
 
 if exist "%ROOT%tools\ffmpeg" (
     echo A pasta tools\ffmpeg ja existe; reutilizando a instalacao anterior.
-    call :cleanup_temp
-    rmdir /S /Q "%STAGEDIR%" 2>nul
+    call :cleanup_ff
     exit /b 0
 )
 
-move "%STAGEDIR%" "%ROOT%tools\ffmpeg" >nul
-if errorlevel 1 (
-    echo Falha ao publicar o FFmpeg.
-    call :cleanup_temp
-    rmdir /S /Q "%STAGEDIR%" 2>nul
-    exit /b 1
-)
+rem O antivirus pode segurar o ffmpeg.exe recem-escrito; tentar algumas vezes.
+set "FF_TRIES=0"
+:ff_try_move
+move "%STAGEDIR%" "%ROOT%tools\ffmpeg" >nul 2>&1
+if not errorlevel 1 goto :ff_move_ok
+set /a FF_TRIES+=1
+if %FF_TRIES% GEQ 6 goto :ff_move_failed
+echo Publicacao do FFmpeg bloqueada; nova tentativa em instantes...
+ping -n 3 127.0.0.1 >nul
+goto :ff_try_move
 
+:ff_move_failed
+echo Falha ao publicar o FFmpeg (acesso negado). Feche antivirus/Explorer que
+echo possam estar usando a pasta tools e execute setup.bat novamente.
+call :cleanup_ff
+exit /b 1
+
+:ff_move_ok
 call :cleanup_temp
 echo FFmpeg instalado localmente.
 exit /b 0
 
 :cleanup_temp
 if defined TMPDIR if exist "%TMPDIR%" rmdir /S /Q "%TMPDIR%" 2>nul
+goto :eof
+
+:cleanup_ff
+if defined TMPDIR if exist "%TMPDIR%" rmdir /S /Q "%TMPDIR%" 2>nul
+if defined STAGEDIR if exist "%STAGEDIR%" rmdir /S /Q "%STAGEDIR%" 2>nul
 goto :eof
 
 :fail
