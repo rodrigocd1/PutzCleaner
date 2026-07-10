@@ -44,6 +44,64 @@ from transcriber import (
 MAX_MARGIN_SEC = 2.0
 _LOG_MAX_LINES = 1000
 
+_CONFIDENCE_HELP_TEXT = (
+    "Confiança mínima — como funciona\n\n"
+    "Cada palavra reconhecida recebe uma confiança de 0 a 1 (o quanto o modelo "
+    "tem certeza do que ouviu). O PutzCleaner só remove um vício de fala se a "
+    "confiança dele for maior ou igual a este valor.\n\n"
+    "Quanto MENOR o valor, mais palavras são removidas (inclusive as duvidosas). "
+    "Quanto MAIOR, mais seguro contra cortes indevidos.\n\n"
+    "Exemplos de valores:\n"
+    "• 0,60  — Seguro (padrão). Corta pouco por engano, mas pode deixar passar "
+    "\"né\"/\"hum\" ditos muito rápido.\n"
+    "• 0,40  — Equilibrado. Remove também vícios reconhecidos com menos certeza. "
+    "Boa escolha para a maioria das entrevistas.\n"
+    "• 0,20  — Agressivo. Pega quase tudo, até o que o modelo mal reconheceu. "
+    "Maior risco de cortar fala legítima.\n\n"
+    "Como calibrar: se um vício aparece na transcrição (.txt) SEM a marca "
+    "[removida], veja a confiança exata dele na seção \"ignorados\" do relatório "
+    "(.json) e ajuste este valor para logo abaixo dela."
+)
+
+
+class Tooltip:
+    """Dica flutuante simples exibida ao passar o mouse sobre um widget."""
+
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self._widget = widget
+        self._text = text
+        self._tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _event: object = None) -> None:
+        if self._tip is not None:
+            return
+        x = self._widget.winfo_rootx() + 20
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+        tip = tk.Toplevel(self._widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tip,
+            text=self._text,
+            justify="left",
+            background="#ffffe0",
+            foreground="#000000",
+            relief="solid",
+            borderwidth=1,
+            wraplength=460,
+            padx=8,
+            pady=6,
+        )
+        label.pack()
+        self._tip = tip
+
+    def _hide(self, _event: object = None) -> None:
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "palavras_removidas": [
         "né", "neh", "eee", "ééé", "ã", "hã", "hum", "tipo", "assim",
@@ -653,11 +711,18 @@ class PutzCleanerApp:
         )
         self.confidence_var = tk.StringVar()
         ttk.Entry(opts2, textvariable=self.confidence_var, width=8).grid(
-            row=0, column=1
+            row=0, column=1, padx=(0, 4)
         )
+        # Ícone de informação: passar o mouse mostra a dica; clicar abre a ajuda.
+        info_icon = ttk.Label(
+            opts2, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
+        )
+        info_icon.grid(row=0, column=2)
+        info_icon.bind("<Button-1>", lambda _e: self._show_confidence_help())
+        Tooltip(info_icon, _CONFIDENCE_HELP_TEXT)
         r += 1
 
-        # Dicas.
+        # Dica sobre o dispositivo (GPU exige NVIDIA + CUDA/cuDNN).
         device_hint = ttk.Label(
             frame,
             text=(
@@ -672,7 +737,7 @@ class PutzCleanerApp:
             frame,
             text=(
                 "Confiança mínima: menor (ex.: 0,4) remove mais vícios de fala "
-                "duvidosos; maior (ex.: 0,6) é mais seguro contra falsos cortes."
+                "duvidosos; maior (ex.: 0,6) é mais seguro. Clique no ⓘ para detalhes."
             ),
             foreground="gray",
         )
@@ -740,6 +805,9 @@ class PutzCleanerApp:
         path = filedialog.askdirectory(title="Escolher pasta de saída")
         if path:
             self.output_var.set(os.path.normpath(os.path.abspath(path)))
+
+    def _show_confidence_help(self) -> None:
+        messagebox.showinfo("Confiança mínima", _CONFIDENCE_HELP_TEXT)
 
     # ---- Processamento ----
 
