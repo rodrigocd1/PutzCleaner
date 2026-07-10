@@ -1,0 +1,8 @@
+# Scripts batch precisam de CRLF no Windows
+*.bat text eol=crlf
+
+# Fontes Python e texto usam LF
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
