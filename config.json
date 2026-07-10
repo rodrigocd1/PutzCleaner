@@ -10,8 +10,9 @@
     "tipo",
     "assim"
   ],
-  "modelo_padrao": "small",
+  "modelo_padrao": "large",
+  "dispositivo": "auto",
   "margem_antes": 0.05,
   "margem_depois": 0.08,
-  "pasta_saida": ""
+  "pasta_saida": "C:\\Users\\Rodrigo-PC\\Downloads\\teste recorte"
 }

@@ -31,6 +31,7 @@ from cutter import (
     resolve_toolchain,
 )
 from transcriber import (
+    DEVICE_CHOICES,
     MODEL_MAP,
     TermValidationError,
     Transcriber,
@@ -47,6 +48,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "né", "neh", "eee", "ééé", "ã", "hã", "hum", "tipo", "assim",
     ],
     "modelo_padrao": "small",
+    "dispositivo": "auto",
     "margem_antes": 0.05,
     "margem_depois": 0.08,
     "pasta_saida": "",
@@ -64,6 +66,7 @@ class ProcessingOptions:
     output_directory: Path
     terms: tuple[str, ...]
     model: str
+    device: str
     margin_before: float
     margin_after: float
 
@@ -119,6 +122,13 @@ def load_config(project_root: Path) -> tuple[dict[str, Any], list[str], bool]:
     else:
         warnings.append("modelo_padrao inválido; usando 'small'.")
 
+    # dispositivo
+    dispositivo = data.get("dispositivo")
+    if dispositivo in DEVICE_CHOICES:
+        config["dispositivo"] = dispositivo
+    else:
+        warnings.append("dispositivo inválido; usando 'auto'.")
+
     # margens
     for chave, padrao in (("margem_antes", 0.05), ("margem_depois", 0.08)):
         valor = data.get(chave)
@@ -148,6 +158,7 @@ def save_config(project_root: Path, config: dict[str, Any]) -> None:
     payload = {
         "palavras_removidas": list(config["palavras_removidas"]),
         "modelo_padrao": config["modelo_padrao"],
+        "dispositivo": config.get("dispositivo", "auto"),
         "margem_antes": float(config["margem_antes"]),
         "margem_depois": float(config["margem_depois"]),
         "pasta_saida": config.get("pasta_saida", ""),
@@ -300,6 +311,7 @@ def run_worker(
             wav_path,
             media_info.timeline_duration,
             options.model,
+            options.device,
             cancel_event,
             log,
             transcribe_progress,
@@ -358,6 +370,8 @@ def run_worker(
             configured_terms=options.terms,
             model_requested=result.model_requested,
             model_resolved=result.model_resolved,
+            device_requested=result.device_requested,
+            device_used=result.device_used,
             margin_before=options.margin_before,
             margin_after=options.margin_after,
             faster_whisper_version=_faster_whisper_version(),
@@ -565,16 +579,38 @@ class PutzCleanerApp:
             width=10,
         )
         self.model_combo.grid(row=0, column=1, padx=(0, 16))
-        ttk.Label(opts, text="Margem antes (s):").grid(row=0, column=2, padx=(0, 4))
+        ttk.Label(opts, text="Processar em:").grid(row=0, column=2, padx=(0, 4))
+        self.device_var = tk.StringVar()
+        self.device_combo = ttk.Combobox(
+            opts,
+            textvariable=self.device_var,
+            values=list(DEVICE_CHOICES),
+            state="readonly",
+            width=8,
+        )
+        self.device_combo.grid(row=0, column=3, padx=(0, 16))
+        ttk.Label(opts, text="Margem antes (s):").grid(row=0, column=4, padx=(0, 4))
         self.margin_before_var = tk.StringVar()
         ttk.Entry(opts, textvariable=self.margin_before_var, width=8).grid(
-            row=0, column=3, padx=(0, 16)
+            row=0, column=5, padx=(0, 16)
         )
-        ttk.Label(opts, text="Margem depois (s):").grid(row=0, column=4, padx=(0, 4))
+        ttk.Label(opts, text="Margem depois (s):").grid(row=0, column=6, padx=(0, 4))
         self.margin_after_var = tk.StringVar()
         ttk.Entry(opts, textvariable=self.margin_after_var, width=8).grid(
-            row=0, column=5
+            row=0, column=7
         )
+        r += 1
+
+        # Dica sobre o dispositivo (GPU exige NVIDIA + CUDA/cuDNN).
+        device_hint = ttk.Label(
+            frame,
+            text=(
+                "Dispositivo: auto usa GPU NVIDIA se disponível (senão CPU). "
+                "cpu usa todos os núcleos. cuda força a GPU."
+            ),
+            foreground="gray",
+        )
+        device_hint.grid(row=r, column=0, sticky="w")
         r += 1
 
         # Botão principal
@@ -614,6 +650,7 @@ class PutzCleanerApp:
         self.terms_text.delete("1.0", "end")
         self.terms_text.insert("1.0", "\n".join(self.config["palavras_removidas"]))
         self.model_var.set(self.config["modelo_padrao"])
+        self.device_var.set(self.config.get("dispositivo", "auto"))
         self.margin_before_var.set(str(self.config["margem_antes"]))
         self.margin_after_var.set(str(self.config["margem_depois"]))
         pasta = self.config.get("pasta_saida", "")
@@ -653,6 +690,7 @@ class PutzCleanerApp:
         # Persistir configuração antes de iniciar.
         self.config["palavras_removidas"] = list(options.terms)
         self.config["modelo_padrao"] = options.model
+        self.config["dispositivo"] = options.device
         self.config["margem_antes"] = options.margin_before
         self.config["margem_depois"] = options.margin_after
         self.config["pasta_saida"] = (
@@ -698,6 +736,10 @@ class PutzCleanerApp:
         if model not in MODEL_MAP:
             raise ValueError("Selecione um modelo válido (small, medium ou large).")
 
+        device = self.device_var.get().strip()
+        if device not in DEVICE_CHOICES:
+            raise ValueError("Selecione um dispositivo válido (auto, cpu ou cuda).")
+
         raw_lines = self.terms_text.get("1.0", "end").splitlines()
         terms = validate_terms(raw_lines)
 
@@ -723,6 +765,7 @@ class PutzCleanerApp:
             output_directory=output_directory,
             terms=terms,
             model=model,
+            device=device,
             margin_before=margin_before,
             margin_after=margin_after,
         )
@@ -806,6 +849,7 @@ class PutzCleanerApp:
         self.process_button.configure(state=state)
         self.terms_text.configure(state=state)
         self.model_combo.configure(state="readonly" if enabled else "disabled")
+        self.device_combo.configure(state="readonly" if enabled else "disabled")
 
     # ---- Fechamento seguro (seção 20.6) ----
 

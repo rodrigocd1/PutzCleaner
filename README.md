@@ -70,10 +70,40 @@ console permanente.
 
 - `small`: mais leve e rápido; é o padrão e vem pré-carregado.
 - `medium`: mais lento, geralmente mais preciso.
-- `large`: mapeia para `large-v3`; muito pesado em CPU e pode ser lento ou
+- `large`: mapeia para `large-v3`; pesado em CPU (use GPU se possível) e pode
   exigir bastante memória RAM.
 
 O primeiro uso de `medium` ou `large` faz o download dos pesos automaticamente.
+
+Se o modelo `small` não estiver detectando vícios que a pessoa claramente
+falou, suba para `medium` ou `large`: modelos maiores reconhecem melhor
+interjeições curtas como "né". Confira também a seção `ignorados` do relatório
+JSON para ver se a palavra foi detectada mas descartada (e por qual motivo).
+
+## Processamento: CPU ou GPU
+
+No campo **Processar em** você escolhe onde a transcrição roda:
+
+- **auto** (padrão): usa a GPU NVIDIA se ela estiver disponível e funcional;
+  caso contrário, usa a CPU automaticamente.
+- **cpu**: força a CPU, usando **todos os núcleos** do processador.
+- **cuda**: força a GPU NVIDIA.
+
+A transcrição em CPU já usa todos os núcleos disponíveis. Ainda assim, para
+modelos `medium`/`large` a GPU é muito mais rápida.
+
+### Habilitar a GPU (NVIDIA)
+
+A GPU exige uma placa NVIDIA com drivers atualizados e as bibliotecas CUDA
+(cuBLAS e cuDNN). Para instalá-las:
+
+1. Dê um duplo clique em `instalar_gpu.bat` (baixa cerca de 1,3 GB).
+2. Ao final, ele confirma se a GPU foi detectada.
+3. Na janela do PutzCleaner, escolha **Processar em: cuda** (ou deixe em
+   **auto**).
+
+Se a GPU não estiver disponível ou as bibliotecas faltarem, o modo **auto**
+simplesmente usa a CPU; o modo **cuda** mostra um erro explicando o que falta.
 
 ## Margens
 

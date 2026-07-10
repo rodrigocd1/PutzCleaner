@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import gc
 import math
+import os
 import threading
 import unicodedata
 from dataclasses import dataclass
@@ -26,6 +27,12 @@ MODEL_MAP: dict[str, str] = {
     "medium": "medium",
     "large": "large-v3",
 }
+
+# Dispositivos oferecidos na interface (seção 5: CPU/int8 é o padrão seguro;
+# "auto" usa GPU CUDA se disponível e cai para CPU; "cuda" força GPU).
+DEVICE_CHOICES: tuple[str, ...] = ("auto", "cpu", "cuda")
+_COMPUTE_CPU = "int8"
+_COMPUTE_CUDA = "float16"
 
 MIN_WORD_PROBABILITY = 0.60
 MIN_WORD_DURATION_SEC = 0.02
@@ -77,6 +84,9 @@ class TranscriptionResult:
     language_probability: float
     model_requested: str
     model_resolved: str
+    device_requested: str
+    device_used: str
+    compute_type: str
 
 
 # ---------------------------------------------------------------------------
@@ -201,32 +211,59 @@ class Transcriber:
     def __init__(self, model_directory: Path) -> None:
         self._model_directory = Path(model_directory)
         self._model = None
-        self._loaded_resolved_name: str | None = None
+        # Chave do modelo em cache: (resolved, device, compute_type).
+        self._loaded_key: tuple[str, str, str] | None = None
+        # CPU: usar todos os núcleos lógicos por padrão.
+        self._cpu_threads = os.cpu_count() or 0
+
+    @staticmethod
+    def cuda_available() -> bool:
+        """Retorna True se houver ao menos uma GPU CUDA utilizável."""
+
+        try:
+            import ctranslate2
+
+            return int(ctranslate2.get_cuda_device_count()) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _device_attempts(self, requested_device: str) -> list[tuple[str, str]]:
+        """Lista ordenada de (device, compute_type) a tentar."""
+
+        req = (requested_device or "auto").lower()
+        if req == "cpu":
+            return [("cpu", _COMPUTE_CPU)]
+        if req in ("cuda", "gpu"):
+            return [("cuda", _COMPUTE_CUDA)]
+        # auto: GPU se disponível, com fallback para CPU.
+        if self.cuda_available():
+            return [("cuda", _COMPUTE_CUDA), ("cpu", _COMPUTE_CPU)]
+        return [("cpu", _COMPUTE_CPU)]
 
     def _ensure_model(
         self,
         requested_model: str,
+        requested_device: str,
         log_callback: Callable[[str], None],
-    ):
+    ) -> tuple[object, str, str]:
         if requested_model not in MODEL_MAP:
             raise TranscriptionError(
                 f"Modelo desconhecido: {requested_model!r}."
             )
         resolved = MODEL_MAP[requested_model]
+        attempts = self._device_attempts(requested_device)
 
-        if self._model is not None and self._loaded_resolved_name == resolved:
-            return self._model
+        # Reaproveitar o modelo se o já carregado atende a algum destino aceito.
+        acceptable = {(resolved, d, c) for d, c in attempts}
+        if self._model is not None and self._loaded_key in acceptable:
+            _, device, compute = self._loaded_key
+            return self._model, device, compute
 
-        # Trocar modelo: descartar referência anterior antes de coletar.
+        # Trocar modelo/dispositivo: descartar referência anterior antes de coletar.
         if self._model is not None:
             self._model = None
-            self._loaded_resolved_name = None
+            self._loaded_key = None
             gc.collect()
-
-        log_callback(
-            f"Carregando o modelo {requested_model}. "
-            "No primeiro uso, o download pode demorar."
-        )
 
         # Importação tardia: faster_whisper é pesado e depende de caches de env.
         try:
@@ -237,33 +274,72 @@ class Transcriber:
                 "(faster-whisper). Execute novamente o setup.bat."
             ) from exc
 
-        try:
-            model = WhisperModel(
-                resolved,
-                device="cpu",
-                compute_type="int8",
-                download_root=str(self._model_directory),
-            )
-        except MemoryError as exc:
-            raise TranscriptionError(
-                "Memória insuficiente para carregar este modelo. "
-                "Tente o modelo small ou medium."
-            ) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise TranscriptionError(
-                "Falha ao carregar o modelo. Verifique a conexão de internet "
-                "para o download inicial e tente novamente."
-            ) from exc
+        last_error: Exception | None = None
+        for device, compute in attempts:
+            if device == "cpu":
+                log_callback(
+                    f"Carregando o modelo {requested_model} em CPU "
+                    f"({self._cpu_threads or 'padrão'} núcleos). "
+                    "No primeiro uso, o download pode demorar."
+                )
+            else:
+                log_callback(
+                    f"Carregando o modelo {requested_model} na GPU (CUDA). "
+                    "No primeiro uso, o download pode demorar."
+                )
+            try:
+                kwargs: dict[str, object] = {
+                    "device": device,
+                    "compute_type": compute,
+                    "download_root": str(self._model_directory),
+                }
+                if device == "cpu" and self._cpu_threads:
+                    kwargs["cpu_threads"] = self._cpu_threads
+                model = WhisperModel(resolved, **kwargs)
+                # Em GPU o carregamento pode ter sucesso mas a inferência falhar
+                # se faltarem cuBLAS/cuDNN; um warmup detecta isso a tempo.
+                if device == "cuda":
+                    _warmup_gpu(model)
+            except MemoryError as exc:
+                raise TranscriptionError(
+                    "Memória insuficiente para carregar este modelo. "
+                    "Tente o modelo small ou medium."
+                ) from exc
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                log_callback(
+                    f"Falha ao usar {device}: {exc}"
+                )
+                model = None
+                gc.collect()
+                continue
 
-        self._model = model
-        self._loaded_resolved_name = resolved
-        return model
+            self._model = model
+            self._loaded_key = (resolved, device, compute)
+            log_callback(
+                f"Modelo pronto em {'GPU (CUDA)' if device == 'cuda' else 'CPU'}."
+            )
+            return model, device, compute
+
+        # Todas as tentativas falharam.
+        if any(d == "cuda" for d, _ in attempts) and len(attempts) == 1:
+            raise TranscriptionError(
+                "Não foi possível usar a GPU (CUDA). Verifique se há uma placa "
+                "NVIDIA com os drivers e bibliotecas CUDA/cuDNN instalados, ou "
+                "selecione CPU. Detalhe: "
+                f"{last_error}"
+            )
+        raise TranscriptionError(
+            "Falha ao carregar o modelo. Verifique a conexão de internet para o "
+            f"download inicial e tente novamente. Detalhe: {last_error}"
+        )
 
     def transcribe(
         self,
         canonical_audio_path: Path,
         timeline_duration: float,
         requested_model: str,
+        requested_device: str,
         cancel_event: threading.Event,
         log_callback: Callable[[str], None],
         progress_callback: Callable[[float], None],
@@ -272,7 +348,9 @@ class Transcriber:
             raise TranscriptionCancelled()
 
         resolved = MODEL_MAP.get(requested_model, requested_model)
-        model = self._ensure_model(requested_model, log_callback)
+        model, device_used, compute_type = self._ensure_model(
+            requested_model, requested_device, log_callback
+        )
 
         if cancel_event.is_set():
             raise TranscriptionCancelled()
@@ -369,7 +447,32 @@ class Transcriber:
             language_probability=language_probability,
             model_requested=requested_model,
             model_resolved=resolved,
+            device_requested=requested_device,
+            device_used=device_used,
+            compute_type=compute_type,
         )
+
+
+def _warmup_gpu(model) -> None:
+    """Força uma inferência mínima para validar as bibliotecas CUDA.
+
+    Levanta exceção se a GPU não puder executar (ex.: cuBLAS/cuDNN ausentes),
+    permitindo o fallback para CPU no modo automático.
+    """
+
+    import numpy as np
+
+    t = np.arange(1600, dtype=np.float32) / 16000.0
+    audio = (0.05 * np.sin(2.0 * np.pi * 300.0 * t)).astype(np.float32)
+    segments, _ = model.transcribe(
+        audio,
+        language="pt",
+        beam_size=1,
+        vad_filter=False,
+        word_timestamps=False,
+    )
+    for _ in segments:
+        pass
 
 
 def _dedupe_boundary_words(words: list[WordToken]) -> list[WordToken]:

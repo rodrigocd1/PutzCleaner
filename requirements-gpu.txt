@@ -1,0 +1,4 @@
+# Suporte opcional a GPU NVIDIA (CUDA 12) para o faster-whisper/ctranslate2.
+# Instale com instalar_gpu.bat. São downloads grandes (~1,3 GB).
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
