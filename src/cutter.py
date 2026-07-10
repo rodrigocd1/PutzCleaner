@@ -1426,8 +1426,11 @@ def verify_output(
 # --- 18.1 Nomes de saída ---
 
 
-def compute_output_paths(input_path: Path, output_dir: Path) -> tuple[Path, Path]:
+def compute_output_paths(
+    input_path: Path, output_dir: Path
+) -> tuple[Path, Path, Path]:
     stem = input_path.stem
     video = output_dir / f"{stem}_limpo.mp4"
     report = output_dir / f"{stem}_limpo_relatorio.json"
-    return video, report
+    transcript = output_dir / f"{stem}_limpo_transcricao.txt"
+    return video, report, transcript

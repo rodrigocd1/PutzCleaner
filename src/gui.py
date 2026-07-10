@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 import cutter
 import report as report_mod
+import transcript as transcript_mod
 from cutter import (
     CutterError,
     RenderCancelled,
@@ -228,8 +229,10 @@ def run_worker(
     work_dir: str | None = None
     staged_video: Path | None = None
     staged_report: Path | None = None
+    staged_transcript: Path | None = None
     published_video = False
     published_report = False
+    published_transcript = False
 
     def log(msg: str) -> None:
         emit("log", msg)
@@ -258,7 +261,9 @@ def run_worker(
         except OSError as exc:
             raise CutterError("Sem permissão de escrita na pasta de saída.") from exc
 
-        final_video, final_report = compute_output_paths(input_path, output_dir)
+        final_video, final_report, final_transcript = compute_output_paths(
+            input_path, output_dir
+        )
 
         # Entrada nunca pode ser igual à saída (case-insensitive no Windows).
         if os.path.normcase(str(input_path.resolve())) == os.path.normcase(
@@ -266,7 +271,7 @@ def run_worker(
         ):
             raise CutterError("O vídeo de saída não pode ser igual ao de entrada.")
 
-        _check_collision(final_video, final_report)
+        _check_collision(final_video, final_report, final_transcript)
 
         emit("progress", 3.0)
         toolchain = resolve_toolchain(project_root)
@@ -287,6 +292,7 @@ def run_worker(
         wav_path = Path(work_dir) / "audio_canonico.wav"
         staged_video = output_dir / f".putzcleaner-{uuid.uuid4().hex}.mp4"
         staged_report = output_dir / f".putzcleaner-{uuid.uuid4().hex}.json"
+        staged_transcript = output_dir / f".putzcleaner-{uuid.uuid4().hex}.txt"
 
         # ---- EXTRACTING_AUDIO (5-10%) ----
         emit("status", "Extraindo áudio canônico...")
@@ -378,29 +384,51 @@ def run_worker(
             ffmpeg_version=toolchain.ffmpeg_version,
         )
         report_mod.write_report_staged(staged_report, payload)
+
+        # Transcrição legível com tempos e marcação [removida].
+        transcript_text = transcript_mod.build_transcript(
+            result.words,
+            plan.occurrences,
+            input_name=str(input_path),
+            model_label=f"{result.model_requested} ({result.model_resolved})",
+            device_label=result.device_used,
+        )
+        transcript_mod.write_transcript_staged(staged_transcript, transcript_text)
         emit("progress", 99.0)
 
         # ---- Publicação sem sobrescrita (seção 18.5) ----
-        _check_collision(final_video, final_report)
+        # Ordem: vídeo, transcrição e por fim o relatório (marcador de commit).
+        _check_collision(final_video, final_report, final_transcript)
         _publish_no_overwrite(staged_video, final_video)
         published_video = True
         staged_video = None
+
+        published_paths: list[Path] = [final_video]
         try:
+            _publish_no_overwrite(staged_transcript, final_transcript)
+            published_transcript = True
+            staged_transcript = None
+            published_paths.append(final_transcript)
+
             _publish_no_overwrite(staged_report, final_report)
             published_report = True
             staged_report = None
         except OSError as exc:
-            # Rollback: remover somente o vídeo que esta execução publicou.
-            try:
-                final_video.unlink()
-            except OSError:
+            # Rollback: remover somente os arquivos que esta execução publicou.
+            orphans: list[str] = []
+            for path in published_paths:
+                try:
+                    path.unlink()
+                except OSError:
+                    orphans.append(str(path))
+            if orphans:
                 emit(
                     "error",
-                    "Falha ao gerar o relatório e o vídeo ficou órfão.",
-                    f"Vídeo órfão: {final_video}. Detalhe: {exc}",
+                    "Falha ao publicar a saída e alguns arquivos ficaram órfãos.",
+                    f"Órfãos: {', '.join(orphans)}. Detalhe: {exc}",
                 )
                 return
-            raise CutterError("Falha ao publicar o relatório.") from exc
+            raise CutterError("Falha ao publicar a saída.") from exc
 
         emit("progress", 100.0)
         emit("status", "Concluído.")
@@ -411,6 +439,7 @@ def run_worker(
             len(plan.occurrences),
             len(plan.cuts),
         )
+        log(f"Transcrição: {final_transcript}")
 
     except (TranscriptionCancelled, RenderCancelled):
         emit("status", "Cancelado.")
@@ -428,6 +457,7 @@ def run_worker(
         for staged, published in (
             (staged_video, published_video),
             (staged_report, published_report),
+            (staged_transcript, published_transcript),
         ):
             if staged is not None and not published:
                 try:
@@ -445,8 +475,8 @@ def run_worker(
         emit("done")
 
 
-def _check_collision(final_video: Path, final_report: Path) -> None:
-    if final_video.exists() or final_report.exists():
+def _check_collision(*final_paths: Path) -> None:
+    if any(path.exists() for path in final_paths):
         raise CutterError(
             "Já existe um arquivo de saída com esse nome. Nada foi sobrescrito.\n"
             "Renomeie/mova o arquivo existente ou escolha outra pasta de saída."

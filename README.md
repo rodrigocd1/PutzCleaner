@@ -124,6 +124,9 @@ Para `entrevista.mp4`, são gerados:
 
 - `entrevista_limpo.mp4` — o vídeo sem os vícios (H.264 / AAC).
 - `entrevista_limpo_relatorio.json` — o relatório auditável.
+- `entrevista_limpo_transcricao.txt` — a transcrição reconhecida, agrupada por
+  trechos com os tempos do vídeo original, marcando com `[removida]` cada
+  palavra que foi cortada do vídeo limpo.
 
 Se já existir um arquivo com esse nome, o programa **para e não sobrescreve
 nada**. Renomeie/mova o arquivo existente ou escolha outra pasta.
