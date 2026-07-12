@@ -20,6 +20,7 @@ from cutter import (
     build_cut_plan,
     compute_output_paths,
 )
+from putz.audio_analysis import AudioProfile, SilenceSpan
 from transcriber import WordToken
 
 
@@ -182,3 +183,23 @@ def test_build_cut_plan_keeps_lexical_tipo_without_pause_context() -> None:
     assert not plan.occurrences
     assert len(plan.ignored) == 1
     assert plan.ignored[0].reason == "contexto_nao_isolado"
+
+
+def test_build_cut_plan_refines_boundaries_with_silence_profile() -> None:
+    words = [
+        _word("né", 1.0, 1.2, normalized="né"),
+        _word("fala", 1.5, 2.0, normalized="fala"),
+    ]
+    profile = AudioProfile(
+        silence_spans=(
+            SilenceSpan(0.82, 0.98),
+            SilenceSpan(1.21, 1.36),
+        ),
+        noise_floor_db=-55.0,
+    )
+
+    plan = build_cut_plan(words, ["né"], 3.0, 0.2, 0.2, 0.6, audio_profile=profile)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].candidate_start == 0.86
+    assert plan.occurrences[0].candidate_end == 1.3

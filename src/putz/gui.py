@@ -22,6 +22,7 @@ from . import cutter
 from . import report as report_mod
 from . import transcript as transcript_mod
 from .transcription_cache import CacheKey, TranscriptionCache
+from .audio_analysis import analyze_wav
 from .cutter import (
     CutterError,
     RenderCancelled,
@@ -417,6 +418,14 @@ def run_worker(
 
         # ---- PLANNING (60-65%) ----
         emit("status", "Calculando cortes...")
+        audio_profile = None
+        try:
+            audio_profile = analyze_wav(wav_path)
+            log(
+                f"Analise de audio: {len(audio_profile.silence_spans)} trecho(s) de silencio detectados."
+            )
+        except Exception as exc:  # noqa: BLE001
+            log(f"Analise de audio indisponivel; usando margens fixas. Detalhe: {exc}")
         plan = build_cut_plan(
             result.words,
             options.terms,
@@ -424,6 +433,7 @@ def run_worker(
             options.margin_before,
             options.margin_after,
             options.min_probability,
+            audio_profile=audio_profile,
         )
         log(
             f"{len(plan.occurrences)} ocorrência(s) aceita(s), "

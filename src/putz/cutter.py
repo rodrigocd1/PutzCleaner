@@ -28,6 +28,7 @@ from .detection import (
     detect_match,
     lexical_context_reason,
 )
+from .audio_analysis import AudioProfile, refine_cut_bounds
 from .transcriber import (
     EPSILON,
     MAX_SEGMENT_NO_SPEECH,
@@ -262,6 +263,7 @@ def build_cut_plan(
     margin_before: float,
     margin_after: float,
     min_probability: float = MIN_WORD_PROBABILITY,
+    audio_profile: AudioProfile | None = None,
 ) -> CutPlan:
     """Constrói o plano de cortes seguro (seção 16)."""
 
@@ -391,6 +393,14 @@ def build_cut_plan(
                     next_start = ps
         if next_start is not None:
             candidate_end = min(candidate_end, next_start)
+
+        candidate_start, candidate_end = refine_cut_bounds(
+            candidate_start=candidate_start,
+            candidate_end=candidate_end,
+            word_start=word_start,
+            word_end=word_end,
+            audio_profile=audio_profile,
+        )
 
         # Item 7: a proteção não pode invadir o núcleo do alvo.
         if (
