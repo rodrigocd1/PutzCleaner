@@ -145,7 +145,8 @@ def test_build_filtergraph_single_keep_snapshot() -> None:
         "[0:0]setpts=PTS-STARTPTS,trim=start=0.500000:end=2.000000,"
         "setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p[vout];\n"
         "[0:1]aresample=async=1:first_pts=0,apad,atrim=start=0:end=3.000000,"
-        "asetpts=PTS-STARTPTS,atrim=start=0.500000:end=2.000000,asetpts=PTS-STARTPTS[aout]"
+        "asetpts=PTS-STARTPTS,atrim=start=0.500000:end=2.000000,asetpts=PTS-STARTPTS,"
+        "afade=t=in:st=0:d=0.012000,afade=t=out:st=1.488000:d=0.012000[aout]"
     )
 
 

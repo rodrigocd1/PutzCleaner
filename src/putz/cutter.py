@@ -48,6 +48,7 @@ from .transcriber import (
 MERGE_GAP_SEC = 0.12
 MAX_MARGIN_SEC = 2.00
 MAX_KEEPS_PER_GRAPH = 100
+DEFAULT_AUDIO_FADE_SEC = 0.012
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _SUBPROCESS_TIMEOUT_SHORT = 10
@@ -930,6 +931,7 @@ def _build_filtergraph(
     audio_index: int,
     keeps: Sequence[KeepInterval],
     timeline_duration: float,
+    audio_fade_sec: float = DEFAULT_AUDIO_FADE_SEC,
 ) -> str:
     """Constrói o filtergraph para 1..MAX_KEEPS_PER_GRAPH keeps (seção 17.2)."""
 
@@ -945,11 +947,12 @@ def _build_filtergraph(
     if k == 1:
         keep = keeps[0]
         s, e = _fmt(keep.start), _fmt(keep.end)
+        audio_filters = _audio_segment_filters(keep, audio_fade_sec)
         parts = [
             f"[0:{video_index}]setpts=PTS-STARTPTS,trim=start={s}:end={e},"
             f"setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p[vout]",
             f"[0:{audio_index}]{audio_norm},atrim=start={s}:end={e},"
-            f"asetpts=PTS-STARTPTS[aout]",
+            f"asetpts=PTS-STARTPTS,{audio_filters}[aout]",
         ]
         return ";\n".join(parts)
 
@@ -961,11 +964,12 @@ def _build_filtergraph(
 
     for i, keep in enumerate(keeps):
         s, e = _fmt(keep.start), _fmt(keep.end)
+        audio_filters = _audio_segment_filters(keep, audio_fade_sec)
         parts.append(
             f"[vsrc{i}]trim=start={s}:end={e},setpts=PTS-STARTPTS[v{i}]"
         )
         parts.append(
-            f"[asrc{i}]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[a{i}]"
+            f"[asrc{i}]atrim=start={s}:end={e},asetpts=PTS-STARTPTS,{audio_filters}[a{i}]"
         )
 
     concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(k))
@@ -974,6 +978,17 @@ def _build_filtergraph(
     parts.append("[acat]anull[aout]")
 
     return ";\n".join(parts)
+
+
+def _audio_segment_filters(keep: KeepInterval, audio_fade_sec: float) -> str:
+    duration = keep.end - keep.start
+    fade = min(audio_fade_sec, max(0.0, duration / 2.0 - EPSILON))
+    if fade <= 0:
+        return "anull"
+    return (
+        f"afade=t=in:st=0:d={_fmt(fade)},"
+        f"afade=t=out:st={_fmt(duration - fade)}:d={_fmt(fade)}"
+    )
 
 
 def render_video(
