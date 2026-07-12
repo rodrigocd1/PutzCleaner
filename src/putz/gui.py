@@ -707,7 +707,7 @@ class PutzCleanerApp:
 
         root.title("PutzCleaner")
         root.geometry("900x720")
-        root.minsize(760, 600)
+        root.minsize(620, 520)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
@@ -727,11 +727,32 @@ class PutzCleanerApp:
     def _build_ui(self) -> None:
         root = self.root
         root.columnconfigure(0, weight=1)
-
-        frame = ttk.Frame(root, padding=12)
-        frame.grid(row=0, column=0, sticky="nsew")
         root.rowconfigure(0, weight=1)
+        scroll_shell = ttk.Frame(root)
+        scroll_shell.grid(row=0, column=0, sticky="nsew")
+        scroll_shell.columnconfigure(0, weight=1)
+        scroll_shell.rowconfigure(0, weight=1)
+
+        self.main_canvas = tk.Canvas(
+            scroll_shell,
+            highlightthickness=0,
+            borderwidth=0,
+            background="#eef3f8",
+        )
+        self.main_canvas.grid(row=0, column=0, sticky="nsew")
+        canvas_scroll = ttk.Scrollbar(
+            scroll_shell, orient="vertical", command=self.main_canvas.yview
+        )
+        canvas_scroll.grid(row=0, column=1, sticky="ns")
+        self.main_canvas.configure(yscrollcommand=canvas_scroll.set)
+
+        frame = ttk.Frame(self.main_canvas, padding=12)
         frame.columnconfigure(0, weight=1)
+        self.main_canvas_window = self.main_canvas.create_window(
+            (0, 0), window=frame, anchor="nw"
+        )
+        frame.bind("<Configure>", self._refresh_scroll_region, add="+")
+        self.main_canvas.bind("<Configure>", self._stretch_content_to_canvas, add="+")
 
         r = 0
         header = ttk.Frame(frame, style="Panel.TFrame", padding=16)
@@ -743,7 +764,11 @@ class PutzCleanerApp:
         self.status_badge.grid(row=0, column=1, sticky="e")
         r += 1
         subtitle = ttk.Label(
-            header, text="Removedor automático de vícios de fala para entrevistas", style="Subtitle.TLabel"
+            header,
+            text="Removedor automático de vícios de fala para entrevistas",
+            style="Subtitle.TLabel",
+            wraplength=560,
+            justify="left",
         )
         subtitle.grid(row=1, column=0, sticky="w", pady=(6, 0))
         r += 1
@@ -821,8 +846,12 @@ class PutzCleanerApp:
         # Opções avançadas
         self.advanced_visible = False
         self.advanced_frame = ttk.Frame(frame, style="Panel.TFrame", padding=12)
-        opts = self.advanced_frame
-        opts.grid(row=r, column=0, sticky="ew", pady=6)
+        self.advanced_frame.grid(row=r, column=0, sticky="ew", pady=6)
+        self.advanced_frame.columnconfigure(0, weight=1)
+
+        opts = ttk.Frame(self.advanced_frame)
+        opts.grid(row=0, column=0, sticky="ew")
+        opts.columnconfigure(1, weight=1)
         ttk.Label(opts, text="Modelo:").grid(row=0, column=0, padx=(0, 4))
         self.model_var = tk.StringVar()
         self.model_combo = ttk.Combobox(
@@ -832,8 +861,10 @@ class PutzCleanerApp:
             state="readonly",
             width=10,
         )
-        self.model_combo.grid(row=0, column=1, padx=(0, 16))
-        ttk.Label(opts, text="Processar em:").grid(row=0, column=2, padx=(0, 4))
+        self.model_combo.grid(row=0, column=1, sticky="w")
+        ttk.Label(opts, text="Processar em:").grid(
+            row=1, column=0, padx=(0, 4), pady=(10, 0), sticky="w"
+        )
         self.device_var = tk.StringVar()
         self.device_combo = ttk.Combobox(
             opts,
@@ -842,59 +873,64 @@ class PutzCleanerApp:
             state="readonly",
             width=8,
         )
-        self.device_combo.grid(row=0, column=3, padx=(0, 16))
-        ttk.Label(opts, text="Margem antes (s):").grid(row=0, column=4, padx=(0, 4))
-        margin_before_info = ttk.Label(
-            opts, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
+        self.device_combo.grid(row=1, column=1, pady=(10, 0), sticky="w")
+        margins_frame = ttk.Frame(self.advanced_frame)
+        margins_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        margins_frame.columnconfigure(1, weight=1)
+        ttk.Label(margins_frame, text="Margem antes (s):").grid(
+            row=0, column=0, padx=(0, 4), sticky="w"
         )
-        margin_before_info.grid(row=0, column=5, padx=(0, 4))
+        margin_before_info = ttk.Label(
+            margins_frame, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
+        )
+        margin_before_info.grid(row=0, column=1, padx=(0, 4))
         margin_before_info.bind(
             "<Button-1>", lambda _e: messagebox.showinfo("Margem antes", _MARGIN_BEFORE_HELP_TEXT)
         )
         Tooltip(margin_before_info, _MARGIN_BEFORE_HELP_TEXT)
         self.margin_before_var = tk.StringVar()
-        ttk.Entry(opts, textvariable=self.margin_before_var, width=8).grid(
-            row=0, column=6, padx=(0, 16)
+        ttk.Entry(margins_frame, textvariable=self.margin_before_var, width=8).grid(
+            row=0, column=2, sticky="w"
         )
-        ttk.Label(opts, text="Margem depois (s):").grid(row=0, column=7, padx=(0, 4))
+        ttk.Label(margins_frame, text="Margem depois (s):").grid(
+            row=1, column=0, padx=(0, 4), pady=(10, 0), sticky="w"
+        )
         margin_after_info = ttk.Label(
-            opts, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
+            margins_frame, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
         )
-        margin_after_info.grid(row=0, column=8, padx=(0, 4))
+        margin_after_info.grid(row=1, column=1, padx=(0, 4), pady=(10, 0))
         margin_after_info.bind(
             "<Button-1>", lambda _e: messagebox.showinfo("Margem depois", _MARGIN_AFTER_HELP_TEXT)
         )
         Tooltip(margin_after_info, _MARGIN_AFTER_HELP_TEXT)
         self.margin_after_var = tk.StringVar()
-        ttk.Entry(opts, textvariable=self.margin_after_var, width=8).grid(
-            row=0, column=9
+        ttk.Entry(margins_frame, textvariable=self.margin_after_var, width=8).grid(
+            row=1, column=2, pady=(10, 0), sticky="w"
         )
+
+        opts2 = ttk.Frame(self.advanced_frame)
+        opts2.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.gpu_encoder_var = tk.BooleanVar(value=False)
         self.gpu_encoder_check = ttk.Checkbutton(
-            opts,
+            opts2,
             text="Usar encoder GPU (NVENC)",
             variable=self.gpu_encoder_var,
         )
-        self.gpu_encoder_check.grid(row=1, column=0, columnspan=5, sticky="w", pady=(10, 0))
-        r += 1
-
-        opts2 = ttk.Frame(self.advanced_frame)
-        opts2.grid(row=r, column=0, sticky="ew", pady=(0, 2))
+        self.gpu_encoder_check.grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Label(opts2, text="Confiança mínima (0-1):").grid(
-            row=0, column=0, padx=(0, 4)
+            row=1, column=0, padx=(0, 4), pady=(10, 0), sticky="w"
         )
         self.confidence_var = tk.StringVar()
         ttk.Entry(opts2, textvariable=self.confidence_var, width=8).grid(
-            row=0, column=1, padx=(0, 4)
+            row=1, column=1, padx=(0, 4), pady=(10, 0), sticky="w"
         )
         # Ícone de informação: passar o mouse mostra a dica; clicar abre a ajuda.
         info_icon = ttk.Label(
             opts2, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
         )
-        info_icon.grid(row=0, column=2)
+        info_icon.grid(row=1, column=2, pady=(10, 0), sticky="w")
         info_icon.bind("<Button-1>", lambda _e: self._show_confidence_help())
         Tooltip(info_icon, _CONFIDENCE_HELP_TEXT)
-        r += 1
 
         # Dica sobre o dispositivo (GPU exige NVIDIA + CUDA/cuDNN).
         device_hint = ttk.Label(
@@ -904,9 +940,10 @@ class PutzCleanerApp:
                 "cpu usa todos os núcleos. cuda força a GPU."
             ),
             foreground="gray",
+            wraplength=600,
+            justify="left",
         )
-        device_hint.grid(row=r, column=0, sticky="w")
-        r += 1
+        device_hint.grid(row=3, column=0, sticky="w", pady=(10, 0))
         confidence_hint = ttk.Label(
             self.advanced_frame,
             text=(
@@ -914,18 +951,17 @@ class PutzCleanerApp:
                 "duvidosos; maior (ex.: 0,6) é mais seguro. Clique no ⓘ para detalhes."
             ),
             foreground="gray",
+            wraplength=600,
+            justify="left",
         )
-        confidence_hint.grid(row=r, column=0, sticky="w")
+        confidence_hint.grid(row=4, column=0, sticky="w", pady=(4, 0))
         r += 1
 
-        # Botão principal
-        self.process_button = ttk.Button(
-            frame, text="Processar vídeo", command=self._on_process
-        )
         self.advanced_frame.grid_remove()
 
         action_frame = ttk.Frame(frame)
         action_frame.grid(row=r, column=0, pady=6, sticky="w")
+        action_frame.columnconfigure(0, weight=1)
         self.process_button = ttk.Button(
             action_frame, text="Processar vídeo", command=self._on_process
         )
@@ -941,7 +977,7 @@ class PutzCleanerApp:
             style="Secondary.TButton",
             state="disabled",
         )
-        self.open_output_button.grid(row=0, column=2, padx=(8, 0))
+        self.open_output_button.grid(row=1, column=0, padx=(0, 8), pady=(8, 0), sticky="w")
         self.open_report_button = ttk.Button(
             action_frame,
             text="Abrir relatório",
@@ -949,7 +985,7 @@ class PutzCleanerApp:
             style="Secondary.TButton",
             state="disabled",
         )
-        self.open_report_button.grid(row=0, column=3, padx=(8, 0))
+        self.open_report_button.grid(row=1, column=1, pady=(8, 0), sticky="w")
         r += 1
 
         # Status
@@ -1036,6 +1072,15 @@ class PutzCleanerApp:
         style.configure("StatusBusy.TLabel", background="#e7f0ff", foreground="#2457a6", padding=(10, 4))
         style.configure("StatusError.TLabel", background="#fde8e8", foreground="#a63333", padding=(10, 4))
 
+    def _refresh_scroll_region(self, _event: object = None) -> None:
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+
+    def _stretch_content_to_canvas(self, event: object) -> None:
+        width = getattr(event, "width", None)
+        if width is None:
+            return
+        self.main_canvas.itemconfigure(self.main_canvas_window, width=width)
+
     def _toggle_advanced(self) -> None:
         self.advanced_visible = not self.advanced_visible
         if self.advanced_visible:
@@ -1044,6 +1089,7 @@ class PutzCleanerApp:
         else:
             self.advanced_frame.grid_remove()
             self.advanced_button.configure(text="Mostrar opções avançadas")
+        self.root.after_idle(self._refresh_scroll_region)
 
     def _on_preset_selected(self, _event: object = None) -> None:
         self._apply_preset_if_needed()
