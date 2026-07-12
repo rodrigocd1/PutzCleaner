@@ -82,7 +82,7 @@ def main() -> int:
     try:
         import tkinter as tk
 
-        from gui import PutzCleanerApp
+        from putz.gui import PutzCleanerApp
 
         root = tk.Tk()
         PutzCleanerApp(root, PROJECT_ROOT)
