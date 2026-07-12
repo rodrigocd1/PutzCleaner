@@ -21,6 +21,7 @@ from typing import Any, Callable
 from . import cutter
 from . import report as report_mod
 from . import transcript as transcript_mod
+from .transcription_cache import CacheKey, TranscriptionCache
 from .cutter import (
     CutterError,
     RenderCancelled,
@@ -130,6 +131,7 @@ class ProcessingOptions:
     margin_before: float
     margin_after: float
     min_probability: float
+    analyze_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +306,7 @@ def run_worker(
     published_video = False
     published_report = False
     published_transcript = False
+    cache = TranscriptionCache(project_root / "models" / ".transcription_cache")
 
     def log(msg: str) -> None:
         emit("log", msg)
@@ -384,15 +387,28 @@ def run_worker(
             emit("progress_mode", "determinate")
             emit("progress", 18.0 + max(0.0, min(1.0, frac)) * 42.0)
 
-        result = transcriber.transcribe(
-            wav_path,
-            media_info.timeline_duration,
-            options.model,
-            options.device,
-            cancel_event,
-            log,
-            transcribe_progress,
+        cache_key = CacheKey.build(
+            input_path=input_path,
+            model_requested=options.model,
+            timeline_duration=media_info.timeline_duration,
         )
+        result = cache.load(cache_key)
+        if result is None:
+            log("Cache de transcricao: miss.")
+            result = transcriber.transcribe(
+                wav_path,
+                media_info.timeline_duration,
+                options.model,
+                options.device,
+                cancel_event,
+                log,
+                transcribe_progress,
+            )
+            cache.save(cache_key, result)
+        else:
+            log("Cache de transcricao: hit.")
+            emit("progress_mode", "determinate")
+            emit("progress", 60.0)
         emit("progress_mode", "determinate")
         emit("progress", 60.0)
 
@@ -418,24 +434,34 @@ def run_worker(
         if cancel_event.is_set():
             raise RenderCancelled()
 
-        # ---- RENDERING / VERIFYING (65-97%) ----
-        emit("status", "Renderizando o vídeo limpo...")
+        if options.analyze_only:
+            emit("status", "Analise concluida. Gerando relatorio...")
+            render_result = cutter.RenderResult(
+                staged_video=final_video,
+                actual_duration=plan.expected_output_duration,
+                video_codec="analise",
+                audio_codec="analise",
+            )
+            emit("progress", 97.0)
+        else:
+            # ---- RENDERING / VERIFYING (65-97%) ----
+            emit("status", "Renderizando o vídeo limpo...")
 
-        def render_progress(frac: float) -> None:
-            emit("progress", 65.0 + max(0.0, min(1.0, frac)) * 32.0)
+            def render_progress(frac: float) -> None:
+                emit("progress", 65.0 + max(0.0, min(1.0, frac)) * 32.0)
 
-        render_result = render_video(
-            toolchain,
-            media_info,
-            input_path,
-            plan,
-            staged_video,
-            Path(work_dir),
-            cancel_event,
-            log,
-            render_progress,
-        )
-        emit("progress", 97.0)
+            render_result = render_video(
+                toolchain,
+                media_info,
+                input_path,
+                plan,
+                staged_video,
+                Path(work_dir),
+                cancel_event,
+                log,
+                render_progress,
+            )
+            emit("progress", 97.0)
 
         # ---- REPORTING (97-99%) ----
         emit("status", "Gerando relatório...")
@@ -471,12 +497,15 @@ def run_worker(
 
         # ---- Publicação sem sobrescrita (seção 18.5) ----
         # Ordem: vídeo, transcrição e por fim o relatório (marcador de commit).
-        _check_collision(final_video, final_report, final_transcript)
-        _publish_no_overwrite(staged_video, final_video)
-        published_video = True
-        staged_video = None
-
-        published_paths: list[Path] = [final_video]
+        published_paths: list[Path] = []
+        if not options.analyze_only:
+            _check_collision(final_video, final_report, final_transcript)
+            _publish_no_overwrite(staged_video, final_video)
+            published_video = True
+            staged_video = None
+            published_paths.append(final_video)
+        else:
+            _check_collision(final_report, final_transcript)
         try:
             _publish_no_overwrite(staged_transcript, final_transcript)
             published_transcript = True
@@ -505,13 +534,23 @@ def run_worker(
 
         emit("progress", 100.0)
         emit("status", "Concluído.")
-        emit(
-            "success",
-            str(final_video),
-            str(final_report),
-            len(plan.occurrences),
-            len(plan.cuts),
-        )
+        if options.analyze_only:
+            emit(
+                "analysis_success",
+                str(final_report),
+                str(final_transcript),
+                len(plan.occurrences),
+                len(plan.cuts),
+                round(sum(cut.end - cut.start for cut in plan.cuts), 3),
+            )
+        else:
+            emit(
+                "success",
+                str(final_video),
+                str(final_report),
+                len(plan.occurrences),
+                len(plan.cuts),
+            )
         log(f"Transcrição: {final_transcript}")
 
     except (TranscriptionCancelled, RenderCancelled):
@@ -748,7 +787,16 @@ class PutzCleanerApp:
         self.process_button = ttk.Button(
             frame, text="Processar vídeo", command=self._on_process
         )
-        self.process_button.grid(row=r, column=0, pady=6)
+        action_frame = ttk.Frame(frame)
+        action_frame.grid(row=r, column=0, pady=6, sticky="w")
+        self.process_button = ttk.Button(
+            action_frame, text="Processar vídeo", command=self._on_process
+        )
+        self.process_button.grid(row=0, column=0, padx=(0, 8))
+        self.analyze_button = ttk.Button(
+            action_frame, text="Analisar sem renderizar", command=self._on_analyze
+        )
+        self.analyze_button.grid(row=0, column=1)
         r += 1
 
         # Status
@@ -812,12 +860,19 @@ class PutzCleanerApp:
     # ---- Processamento ----
 
     def _on_process(self) -> None:
+        self._start_processing(analyze_only=False)
+
+    def _on_analyze(self) -> None:
+        self._start_processing(analyze_only=True)
+
+    def _start_processing(self, analyze_only: bool) -> None:
         if self.worker is not None and self.worker.is_alive():
             messagebox.showinfo("PutzCleaner", "Já existe um processamento em andamento.")
             return
 
         try:
             options = self._collect_options()
+            options = ProcessingOptions(**{**options.__dict__, "analyze_only": analyze_only})
         except (ValueError, TermValidationError, CutterError) as exc:
             messagebox.showerror("Entrada inválida", str(exc))
             return
@@ -962,6 +1017,18 @@ class PutzCleanerApp:
                 f"Vídeo: {video_path}\n"
                 f"Relatório: {report_path}",
             )
+        elif kind == "analysis_success":
+            report_path, transcript_path, occurrences, cuts, removed_seconds = payload
+            self._append_log(f"Relatório da análise: {report_path}")
+            self._append_log(f"Transcrição: {transcript_path}")
+            messagebox.showinfo(
+                "PutzCleaner",
+                "Análise concluída.\n\n"
+                f"Ocorrências aceitas: {occurrences}\n"
+                f"Cortes planejados: {cuts}\n"
+                f"Tempo estimado removido: {removed_seconds}s\n"
+                f"Relatório: {report_path}",
+            )
         elif kind == "error":
             user_message = payload[0]
             technical = payload[1] if len(payload) > 1 else ""
@@ -993,6 +1060,7 @@ class PutzCleanerApp:
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         self.process_button.configure(state=state)
+        self.analyze_button.configure(state=state)
         self.terms_text.configure(state=state)
         self.model_combo.configure(state="readonly" if enabled else "disabled")
         self.device_combo.configure(state="readonly" if enabled else "disabled")
