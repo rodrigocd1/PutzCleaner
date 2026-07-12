@@ -208,6 +208,20 @@ def test_build_cut_plan_refines_boundaries_with_silence_profile() -> None:
     assert plan.occurrences[0].candidate_end == 1.3
 
 
+def test_build_cut_plan_accepts_margins_above_recommended_limit() -> None:
+    words = [
+        _word("olá", 0.0, 0.4, normalized="olá"),
+        _word("né", 1.0, 1.2, normalized="né"),
+        _word("tchau", 3.8, 4.2, normalized="tchau"),
+    ]
+
+    plan = build_cut_plan(words, ["né"], 6.0, 3.0, 3.0, 0.6)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].candidate_start == 0.4
+    assert plan.occurrences[0].candidate_end == 3.8
+
+
 def test_build_cut_plan_matches_phrase_term() -> None:
     words = [
         _word("isso", 0.0, 0.2, normalized="isso"),

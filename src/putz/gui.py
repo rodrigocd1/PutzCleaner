@@ -65,6 +65,24 @@ _CONFIDENCE_HELP_TEXT = (
     "(.json) e ajuste este valor para logo abaixo dela."
 )
 
+_MARGIN_BEFORE_HELP_TEXT = (
+    "Margem antes — como funciona\n\n"
+    "Define quanto tempo antes do vício de fala o corte pode avançar.\n\n"
+    "Valores maiores podem soar mais naturais em algumas pausas, mas também "
+    "aumentam o risco de aproximar demais o corte da fala útil.\n\n"
+    f"O valor recomendado é até {MAX_MARGIN_SEC:.0f}s. Acima disso, o programa "
+    "permite continuar, mas registra um aviso no log para revisão."
+)
+
+_MARGIN_AFTER_HELP_TEXT = (
+    "Margem depois — como funciona\n\n"
+    "Define quanto tempo depois do vício de fala o corte pode avançar.\n\n"
+    "Valores maiores ajudam quando o vício emenda numa pausa, mas também podem "
+    "engolir mais contexto do que o necessário.\n\n"
+    f"O valor recomendado é até {MAX_MARGIN_SEC:.0f}s. Acima disso, o programa "
+    "permite continuar, mas registra um aviso no log para revisão."
+)
+
 PRESET_DEFAULT = "Equilibrado"
 PRESET_CUSTOM = "Personalizado"
 PRESET_CONFIGS: dict[str, dict[str, str]] = {
@@ -222,7 +240,7 @@ def load_config(project_root: Path) -> tuple[dict[str, Any], list[str], bool]:
         valor = data.get(chave)
         try:
             fvalor = float(valor)
-            if not (0.0 <= fvalor <= MAX_MARGIN_SEC):
+            if fvalor < 0.0:
                 raise ValueError
             config[chave] = fvalor
         except (TypeError, ValueError):
@@ -826,14 +844,30 @@ class PutzCleanerApp:
         )
         self.device_combo.grid(row=0, column=3, padx=(0, 16))
         ttk.Label(opts, text="Margem antes (s):").grid(row=0, column=4, padx=(0, 4))
+        margin_before_info = ttk.Label(
+            opts, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
+        )
+        margin_before_info.grid(row=0, column=5, padx=(0, 4))
+        margin_before_info.bind(
+            "<Button-1>", lambda _e: messagebox.showinfo("Margem antes", _MARGIN_BEFORE_HELP_TEXT)
+        )
+        Tooltip(margin_before_info, _MARGIN_BEFORE_HELP_TEXT)
         self.margin_before_var = tk.StringVar()
         ttk.Entry(opts, textvariable=self.margin_before_var, width=8).grid(
-            row=0, column=5, padx=(0, 16)
+            row=0, column=6, padx=(0, 16)
         )
-        ttk.Label(opts, text="Margem depois (s):").grid(row=0, column=6, padx=(0, 4))
+        ttk.Label(opts, text="Margem depois (s):").grid(row=0, column=7, padx=(0, 4))
+        margin_after_info = ttk.Label(
+            opts, text="ⓘ", foreground="#1a6fd4", cursor="hand2"
+        )
+        margin_after_info.grid(row=0, column=8, padx=(0, 4))
+        margin_after_info.bind(
+            "<Button-1>", lambda _e: messagebox.showinfo("Margem depois", _MARGIN_AFTER_HELP_TEXT)
+        )
+        Tooltip(margin_after_info, _MARGIN_AFTER_HELP_TEXT)
         self.margin_after_var = tk.StringVar()
         ttk.Entry(opts, textvariable=self.margin_after_var, width=8).grid(
-            row=0, column=7
+            row=0, column=9
         )
         self.gpu_encoder_var = tk.BooleanVar(value=False)
         self.gpu_encoder_check = ttk.Checkbutton(
@@ -841,7 +875,7 @@ class PutzCleanerApp:
             text="Usar encoder GPU (NVENC)",
             variable=self.gpu_encoder_var,
         )
-        self.gpu_encoder_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.gpu_encoder_check.grid(row=1, column=0, columnspan=5, sticky="w", pady=(10, 0))
         r += 1
 
         opts2 = ttk.Frame(self.advanced_frame)
@@ -1075,6 +1109,7 @@ class PutzCleanerApp:
             "" if self.output_var.get() == "Mesma pasta do vídeo"
             else str(options.output_directory)
         )
+        self._warn_if_large_margins(options)
         try:
             if self.config_corrupt:
                 if not messagebox.askyesno(
@@ -1126,11 +1161,11 @@ class PutzCleanerApp:
             margin_after = parse_decimal(self.margin_after_var.get())
         except ValueError as exc:
             raise ValueError(
-                "Margens inválidas. Use um número entre 0 e 2 (ex.: 0,05)."
+                "Margens inválidas. Use um número maior ou igual a 0 (ex.: 0,05)."
             ) from exc
         for margin in (margin_before, margin_after):
-            if not (0.0 <= margin <= MAX_MARGIN_SEC):
-                raise ValueError("As margens devem estar entre 0 e 2 segundos.")
+            if margin < 0.0:
+                raise ValueError("As margens devem ser maiores ou iguais a 0.")
 
         try:
             min_probability = parse_decimal(self.confidence_var.get())
@@ -1159,6 +1194,16 @@ class PutzCleanerApp:
             preset_name=self.preset_var.get().strip() or PRESET_DEFAULT,
             use_gpu_encoder=bool(self.gpu_encoder_var.get()),
         )
+
+    def _warn_if_large_margins(self, options: ProcessingOptions) -> None:
+        if options.margin_before > MAX_MARGIN_SEC:
+            self._append_log(
+                f"Aviso: margem antes acima do recomendado ({options.margin_before:.2f}s > {MAX_MARGIN_SEC:.2f}s)."
+            )
+        if options.margin_after > MAX_MARGIN_SEC:
+            self._append_log(
+                f"Aviso: margem depois acima do recomendado ({options.margin_after:.2f}s > {MAX_MARGIN_SEC:.2f}s)."
+            )
 
     # ---- Fila de eventos ----
 

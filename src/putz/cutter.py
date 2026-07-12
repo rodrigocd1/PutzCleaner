@@ -293,10 +293,8 @@ def build_cut_plan(
         raise CutterError("Duração da timeline inválida.")
     mb = _sanitize_float(margin_before)
     ma = _sanitize_float(margin_after)
-    if mb is None or ma is None or not (0.0 <= mb <= MAX_MARGIN_SEC) or not (
-        0.0 <= ma <= MAX_MARGIN_SEC
-    ):
-        raise CutterError("Margens inválidas; use valores entre 0 e 2 segundos.")
+    if mb is None or ma is None or mb < 0.0 or ma < 0.0:
+        raise CutterError("Margens inválidas; use valores maiores ou iguais a 0.")
     minp = _sanitize_float(min_probability)
     if minp is None or not (0.0 <= minp <= 1.0):
         raise CutterError("Limiar de confiança inválido; use um valor entre 0 e 1.")
