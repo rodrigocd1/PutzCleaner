@@ -276,6 +276,33 @@ def _intervals_overlap(
     return max(0.0, hi - lo)
 
 
+def _protected_overlap_forbidden(
+    candidate_start: float,
+    candidate_end: float,
+    word_start: float,
+    word_end: float,
+    protected_start: float,
+    protected_end: float,
+    aggressive_before: bool,
+    aggressive_after: bool,
+) -> bool:
+    candidate_overlap = _intervals_overlap(
+        candidate_start, candidate_end, protected_start, protected_end
+    )
+    if candidate_overlap <= EPSILON:
+        return False
+    core_overlap = _intervals_overlap(
+        word_start, word_end, protected_start, protected_end
+    )
+    if core_overlap > EPSILON:
+        return True
+    if aggressive_before and protected_end <= word_start + EPSILON:
+        return False
+    if aggressive_after and protected_start >= word_end - EPSILON:
+        return False
+    return True
+
+
 def build_cut_plan(
     words: Sequence[WordToken],
     configured_terms: Sequence[str],
@@ -392,6 +419,8 @@ def build_cut_plan(
             )
 
     protected.sort()
+    aggressive_before = mb > MAX_MARGIN_SEC
+    aggressive_after = ma > MAX_MARGIN_SEC
 
     # --- 16.2 Avaliação dos alvos ---
     occurrences: list[CutOccurrence] = []
@@ -412,31 +441,38 @@ def build_cut_plan(
         candidate_end = min(td, word_end + ma)
 
         # Proteger vizinha anterior: maior end <= word_start + EPSILON.
-        prev_end = None
-        for ps, pe in protected:
-            if pe <= word_start + EPSILON:
-                if prev_end is None or pe > prev_end:
-                    prev_end = pe
-            # protected está ordenado por start; não dá para parar cedo pelo end.
-        if prev_end is not None:
-            candidate_start = max(candidate_start, prev_end)
+        if not aggressive_before:
+            prev_end = None
+            for ps, pe in protected:
+                if pe <= word_start + EPSILON:
+                    if prev_end is None or pe > prev_end:
+                        prev_end = pe
+                # protected está ordenado por start; não dá para parar cedo pelo end.
+            if prev_end is not None:
+                candidate_start = max(candidate_start, prev_end)
 
         # Proteger vizinha posterior: menor start >= word_end - EPSILON.
-        next_start = None
-        for ps, pe in protected:
-            if ps >= word_end - EPSILON:
-                if next_start is None or ps < next_start:
-                    next_start = ps
-        if next_start is not None:
-            candidate_end = min(candidate_end, next_start)
+        if not aggressive_after:
+            next_start = None
+            for ps, pe in protected:
+                if ps >= word_end - EPSILON:
+                    if next_start is None or ps < next_start:
+                        next_start = ps
+            if next_start is not None:
+                candidate_end = min(candidate_end, next_start)
 
-        candidate_start, candidate_end = refine_cut_bounds(
-            candidate_start=candidate_start,
-            candidate_end=candidate_end,
-            word_start=word_start,
-            word_end=word_end,
-            audio_profile=audio_profile,
-        )
+        if not aggressive_before or not aggressive_after:
+            refined_start, refined_end = refine_cut_bounds(
+                candidate_start=candidate_start,
+                candidate_end=candidate_end,
+                word_start=word_start,
+                word_end=word_end,
+                audio_profile=audio_profile,
+            )
+            if not aggressive_before:
+                candidate_start = refined_start
+            if not aggressive_after:
+                candidate_end = refined_end
 
         # Item 7: a proteção não pode invadir o núcleo do alvo.
         if (
@@ -449,7 +485,16 @@ def build_cut_plan(
 
         # Item 8: revalidar que o candidato inteiro não intersecta protegida.
         if any(
-            _intervals_overlap(candidate_start, candidate_end, ps, pe) > EPSILON
+            _protected_overlap_forbidden(
+                candidate_start,
+                candidate_end,
+                word_start,
+                word_end,
+                ps,
+                pe,
+                aggressive_before,
+                aggressive_after,
+            )
             for ps, pe in protected
         ):
             ignored.append(_ignored_target(target, REASON_OVERLAP_PROTECTED))
@@ -470,7 +515,8 @@ def build_cut_plan(
         )
 
     # --- 16.3 União dos candidatos ---
-    cuts = _merge_candidates(occurrences, protected, td)
+    merge_protected = [] if aggressive_before or aggressive_after else protected
+    cuts = _merge_candidates(occurrences, merge_protected, td)
 
     # --- 16.4 Complemento preservado ---
     keeps = _build_keeps(cuts, td)

@@ -218,8 +218,42 @@ def test_build_cut_plan_accepts_margins_above_recommended_limit() -> None:
     plan = build_cut_plan(words, ["né"], 6.0, 3.0, 3.0, 0.6)
 
     assert len(plan.occurrences) == 1
-    assert plan.occurrences[0].candidate_start == 0.4
-    assert plan.occurrences[0].candidate_end == 3.8
+    assert plan.occurrences[0].candidate_start == 0.0
+    assert plan.occurrences[0].candidate_end == 4.2
+
+
+def test_build_cut_plan_large_before_margin_overrides_neighbor_protection() -> None:
+    words = [
+        _word("fala", 9.0, 9.5, normalized="fala"),
+        _word("né", 20.0, 20.2, normalized="né"),
+        _word("depois", 20.8, 21.2, normalized="depois"),
+    ]
+
+    plan = build_cut_plan(words, ["né"], 30.0, 15.0, 0.1, 0.6)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].candidate_start == 5.0
+    assert plan.occurrences[0].candidate_end == 20.3
+
+
+def test_build_cut_plan_large_margin_is_not_shortened_by_silence_snap() -> None:
+    words = [
+        _word("fala", 9.0, 9.5, normalized="fala"),
+        _word("né", 20.0, 20.2, normalized="né"),
+    ]
+    profile = AudioProfile(
+        silence_spans=(
+            SilenceSpan(19.6, 19.95),
+            SilenceSpan(20.22, 20.5),
+        ),
+        noise_floor_db=-55.0,
+    )
+
+    plan = build_cut_plan(words, ["né"], 30.0, 15.0, 4.0, 0.6, audio_profile=profile)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].candidate_start == 5.0
+    assert plan.occurrences[0].candidate_end == 24.2
 
 
 def test_build_cut_plan_matches_phrase_term() -> None:
