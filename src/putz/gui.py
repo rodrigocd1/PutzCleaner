@@ -65,6 +65,26 @@ _CONFIDENCE_HELP_TEXT = (
     "(.json) e ajuste este valor para logo abaixo dela."
 )
 
+PRESET_DEFAULT = "Equilibrado"
+PRESET_CUSTOM = "Personalizado"
+PRESET_CONFIGS: dict[str, dict[str, str]] = {
+    "Conservador": {
+        "confidence": "0.60",
+        "margin_before": "0.03",
+        "margin_after": "0.05",
+    },
+    PRESET_DEFAULT: {
+        "confidence": "0.40",
+        "margin_before": "0.05",
+        "margin_after": "0.08",
+    },
+    "Agressivo": {
+        "confidence": "0.20",
+        "margin_before": "0.08",
+        "margin_after": "0.12",
+    },
+}
+
 
 class Tooltip:
     """Dica flutuante simples exibida ao passar o mouse sobre um widget."""
@@ -114,6 +134,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "margem_depois": 0.08,
     "limiar_confianca": 0.60,
     "pasta_saida": "",
+    "modo_preset": PRESET_DEFAULT,
 }
 
 
@@ -214,6 +235,12 @@ def load_config(project_root: Path) -> tuple[dict[str, Any], list[str], bool]:
     except (TypeError, ValueError):
         warnings.append("limiar_confianca inválido; usando 0.60.")
 
+    preset = data.get("modo_preset")
+    if isinstance(preset, str) and preset in {*PRESET_CONFIGS.keys(), PRESET_CUSTOM}:
+        config["modo_preset"] = preset
+    else:
+        config["modo_preset"] = PRESET_DEFAULT
+
     # pasta_saida
     pasta = data.get("pasta_saida", "")
     if isinstance(pasta, str):
@@ -236,6 +263,7 @@ def save_config(project_root: Path, config: dict[str, Any]) -> None:
         "margem_antes": float(config["margem_antes"]),
         "margem_depois": float(config["margem_depois"]),
         "limiar_confianca": float(config.get("limiar_confianca", 0.60)),
+        "modo_preset": config.get("modo_preset", PRESET_DEFAULT),
         "pasta_saida": config.get("pasta_saida", ""),
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
@@ -629,8 +657,13 @@ class PutzCleanerApp:
         self.worker: threading.Thread | None = None
         self.transcriber = Transcriber(project_root / "models")
         self._closing_after_cancel = False
+        self._applying_preset = False
+        self._last_video_path: str | None = None
+        self._last_report_path: str | None = None
+        self._last_output_dir: str | None = None
 
         self.config, warnings, self.config_corrupt = load_config(project_root)
+        self._configure_styles()
 
         root.title("PutzCleaner")
         root.geometry("900x720")
@@ -661,21 +694,26 @@ class PutzCleanerApp:
         frame.columnconfigure(0, weight=1)
 
         r = 0
-        title = ttk.Label(frame, text="PutzCleaner", font=("Segoe UI", 18, "bold"))
-        title.grid(row=r, column=0, sticky="w")
+        header = ttk.Frame(frame, style="Panel.TFrame", padding=16)
+        header.grid(row=r, column=0, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+        title = ttk.Label(header, text="PutzCleaner", style="HeroTitle.TLabel")
+        title.grid(row=0, column=0, sticky="w")
+        self.status_badge = ttk.Label(header, text="Pronto", style="StatusReady.TLabel")
+        self.status_badge.grid(row=0, column=1, sticky="e")
         r += 1
         subtitle = ttk.Label(
-            frame, text="Removedor automático de vícios de fala para entrevistas"
+            header, text="Removedor automático de vícios de fala para entrevistas", style="Subtitle.TLabel"
         )
-        subtitle.grid(row=r, column=0, sticky="w", pady=(0, 8))
+        subtitle.grid(row=1, column=0, sticky="w", pady=(6, 0))
         r += 1
 
         # Linha do vídeo
-        video_frame = ttk.Frame(frame)
+        video_frame = ttk.Frame(frame, style="Panel.TFrame", padding=12)
         video_frame.grid(row=r, column=0, sticky="ew", pady=4)
         video_frame.columnconfigure(1, weight=1)
         ttk.Button(
-            video_frame, text="Selecionar vídeo", command=self._choose_video
+            video_frame, text="Selecionar vídeo", command=self._choose_video, style="Primary.TButton"
         ).grid(row=0, column=0, padx=(0, 8))
         self.video_var = tk.StringVar()
         ttk.Entry(video_frame, textvariable=self.video_var, state="readonly").grid(
@@ -684,7 +722,7 @@ class PutzCleanerApp:
         r += 1
 
         # Linha de saída
-        out_frame = ttk.Frame(frame)
+        out_frame = ttk.Frame(frame, style="Panel.TFrame", padding=12)
         out_frame.grid(row=r, column=0, sticky="ew", pady=4)
         out_frame.columnconfigure(0, weight=1)
         self.output_var = tk.StringVar(value="Mesma pasta do vídeo")
@@ -697,7 +735,7 @@ class PutzCleanerApp:
         r += 1
 
         # LabelFrame da lista
-        list_frame = ttk.LabelFrame(frame, text="Palavras/sons a remover", padding=8)
+        list_frame = ttk.LabelFrame(frame, text="Palavras/sons a remover", padding=12)
         list_frame.grid(row=r, column=0, sticky="nsew", pady=6)
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(1, weight=1)
@@ -718,8 +756,32 @@ class PutzCleanerApp:
         self.terms_text.configure(yscrollcommand=term_scroll.set)
         r += 1
 
-        # Opções
-        opts = ttk.Frame(frame)
+        preset_frame = ttk.Frame(frame, style="Panel.TFrame", padding=12)
+        preset_frame.grid(row=r, column=0, sticky="ew", pady=6)
+        ttk.Label(preset_frame, text="Modo:").grid(row=0, column=0, padx=(0, 4))
+        self.preset_var = tk.StringVar()
+        self.preset_combo = ttk.Combobox(
+            preset_frame,
+            textvariable=self.preset_var,
+            values=[*PRESET_CONFIGS.keys(), PRESET_CUSTOM],
+            state="readonly",
+            width=16,
+        )
+        self.preset_combo.grid(row=0, column=1, padx=(0, 12))
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
+        self.advanced_button = ttk.Button(
+            preset_frame,
+            text="Mostrar opções avançadas",
+            command=self._toggle_advanced,
+            style="Secondary.TButton",
+        )
+        self.advanced_button.grid(row=0, column=2, sticky="w")
+        r += 1
+
+        # Opções avançadas
+        self.advanced_visible = False
+        self.advanced_frame = ttk.Frame(frame, style="Panel.TFrame", padding=12)
+        opts = self.advanced_frame
         opts.grid(row=r, column=0, sticky="ew", pady=6)
         ttk.Label(opts, text="Modelo:").grid(row=0, column=0, padx=(0, 4))
         self.model_var = tk.StringVar()
@@ -753,7 +815,7 @@ class PutzCleanerApp:
         )
         r += 1
 
-        opts2 = ttk.Frame(frame)
+        opts2 = ttk.Frame(self.advanced_frame)
         opts2.grid(row=r, column=0, sticky="ew", pady=(0, 2))
         ttk.Label(opts2, text="Confiança mínima (0-1):").grid(
             row=0, column=0, padx=(0, 4)
@@ -773,7 +835,7 @@ class PutzCleanerApp:
 
         # Dica sobre o dispositivo (GPU exige NVIDIA + CUDA/cuDNN).
         device_hint = ttk.Label(
-            frame,
+            self.advanced_frame,
             text=(
                 "Dispositivo: auto usa GPU NVIDIA se disponível (senão CPU). "
                 "cpu usa todos os núcleos. cuda força a GPU."
@@ -783,7 +845,7 @@ class PutzCleanerApp:
         device_hint.grid(row=r, column=0, sticky="w")
         r += 1
         confidence_hint = ttk.Label(
-            frame,
+            self.advanced_frame,
             text=(
                 "Confiança mínima: menor (ex.: 0,4) remove mais vícios de fala "
                 "duvidosos; maior (ex.: 0,6) é mais seguro. Clique no ⓘ para detalhes."
@@ -797,6 +859,8 @@ class PutzCleanerApp:
         self.process_button = ttk.Button(
             frame, text="Processar vídeo", command=self._on_process
         )
+        self.advanced_frame.grid_remove()
+
         action_frame = ttk.Frame(frame)
         action_frame.grid(row=r, column=0, pady=6, sticky="w")
         self.process_button = ttk.Button(
@@ -804,9 +868,25 @@ class PutzCleanerApp:
         )
         self.process_button.grid(row=0, column=0, padx=(0, 8))
         self.analyze_button = ttk.Button(
-            action_frame, text="Analisar sem renderizar", command=self._on_analyze
+            action_frame, text="Analisar sem renderizar", command=self._on_analyze, style="Secondary.TButton"
         )
         self.analyze_button.grid(row=0, column=1)
+        self.open_output_button = ttk.Button(
+            action_frame,
+            text="Abrir saída",
+            command=self._open_output_dir,
+            style="Secondary.TButton",
+            state="disabled",
+        )
+        self.open_output_button.grid(row=0, column=2, padx=(8, 0))
+        self.open_report_button = ttk.Button(
+            action_frame,
+            text="Abrir relatório",
+            command=self._open_report,
+            style="Secondary.TButton",
+            state="disabled",
+        )
+        self.open_report_button.grid(row=0, column=3, padx=(8, 0))
         r += 1
 
         # Status
@@ -838,6 +918,7 @@ class PutzCleanerApp:
     def _apply_config_to_widgets(self) -> None:
         self.terms_text.delete("1.0", "end")
         self.terms_text.insert("1.0", "\n".join(self.config["palavras_removidas"]))
+        self.preset_var.set(self.config.get("modo_preset", PRESET_DEFAULT))
         self.model_var.set(self.config["modelo_padrao"])
         self.device_var.set(self.config.get("dispositivo", "auto"))
         self.margin_before_var.set(str(self.config["margem_antes"]))
@@ -848,6 +929,10 @@ class PutzCleanerApp:
             self.output_var.set(pasta)
         else:
             self.output_var.set("Mesma pasta do vídeo")
+        self._apply_preset_if_needed()
+        self.margin_before_var.trace_add("write", self._mark_custom_preset)
+        self.margin_after_var.trace_add("write", self._mark_custom_preset)
+        self.confidence_var.trace_add("write", self._mark_custom_preset)
 
     # ---- Seleção de arquivos ----
 
@@ -866,6 +951,66 @@ class PutzCleanerApp:
 
     def _show_confidence_help(self) -> None:
         messagebox.showinfo("Confiança mínima", _CONFIDENCE_HELP_TEXT)
+
+    def _configure_styles(self) -> None:
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self.root.configure(background="#eef3f8")
+        style.configure("TFrame", background="#eef3f8")
+        style.configure("Panel.TFrame", background="#ffffff", relief="flat")
+        style.configure("TLabelframe", background="#ffffff")
+        style.configure("TLabelframe.Label", background="#ffffff", font=("Segoe UI Semibold", 10))
+        style.configure("TLabel", background="#eef3f8", font=("Segoe UI", 10))
+        style.configure("Subtitle.TLabel", background="#ffffff", foreground="#4b5b6b", font=("Segoe UI", 10))
+        style.configure("HeroTitle.TLabel", background="#ffffff", foreground="#142235", font=("Segoe UI Semibold", 20))
+        style.configure("Primary.TButton", font=("Segoe UI Semibold", 10))
+        style.configure("Secondary.TButton", font=("Segoe UI", 10))
+        style.configure("StatusReady.TLabel", background="#dff4e8", foreground="#1d6b43", padding=(10, 4))
+        style.configure("StatusBusy.TLabel", background="#e7f0ff", foreground="#2457a6", padding=(10, 4))
+        style.configure("StatusError.TLabel", background="#fde8e8", foreground="#a63333", padding=(10, 4))
+
+    def _toggle_advanced(self) -> None:
+        self.advanced_visible = not self.advanced_visible
+        if self.advanced_visible:
+            self.advanced_frame.grid()
+            self.advanced_button.configure(text="Ocultar opções avançadas")
+        else:
+            self.advanced_frame.grid_remove()
+            self.advanced_button.configure(text="Mostrar opções avançadas")
+
+    def _on_preset_selected(self, _event: object = None) -> None:
+        self._apply_preset_if_needed()
+
+    def _apply_preset_if_needed(self) -> None:
+        preset = self.preset_var.get().strip() or PRESET_DEFAULT
+        config = PRESET_CONFIGS.get(preset)
+        if config is None:
+            return
+        self._applying_preset = True
+        self.confidence_var.set(config["confidence"])
+        self.margin_before_var.set(config["margin_before"])
+        self.margin_after_var.set(config["margin_after"])
+        self._applying_preset = False
+
+    def _mark_custom_preset(self, *_args: object) -> None:
+        if self._applying_preset:
+            return
+        current = self.preset_var.get().strip()
+        if current == PRESET_CUSTOM:
+            return
+        config = PRESET_CONFIGS.get(current)
+        if config is None:
+            self.preset_var.set(PRESET_CUSTOM)
+            return
+        if (
+            self.confidence_var.get().strip() != config["confidence"]
+            or self.margin_before_var.get().strip() != config["margin_before"]
+            or self.margin_after_var.get().strip() != config["margin_after"]
+        ):
+            self.preset_var.set(PRESET_CUSTOM)
 
     # ---- Processamento ----
 
@@ -894,6 +1039,7 @@ class PutzCleanerApp:
         self.config["margem_antes"] = options.margin_before
         self.config["margem_depois"] = options.margin_after
         self.config["limiar_confianca"] = options.min_probability
+        self.config["modo_preset"] = self.preset_var.get().strip() or PRESET_DEFAULT
         self.config["pasta_saida"] = (
             "" if self.output_var.get() == "Mesma pasta do vídeo"
             else str(options.output_directory)
@@ -1021,6 +1167,11 @@ class PutzCleanerApp:
             video_path, report_path, occurrences, cuts = payload
             self._append_log(f"Vídeo: {video_path}")
             self._append_log(f"Relatório: {report_path}")
+            self._last_video_path = video_path
+            self._last_report_path = report_path
+            self._last_output_dir = str(Path(video_path).parent)
+            self.open_output_button.configure(state="normal")
+            self.open_report_button.configure(state="normal")
             messagebox.showinfo(
                 "PutzCleaner",
                 "Processamento concluído.\n\n"
@@ -1031,6 +1182,11 @@ class PutzCleanerApp:
             report_path, transcript_path, occurrences, cuts, removed_seconds = payload
             self._append_log(f"Relatório da análise: {report_path}")
             self._append_log(f"Transcrição: {transcript_path}")
+            self._last_video_path = None
+            self._last_report_path = report_path
+            self._last_output_dir = str(Path(report_path).parent)
+            self.open_output_button.configure(state="normal")
+            self.open_report_button.configure(state="normal")
             messagebox.showinfo(
                 "PutzCleaner",
                 "Análise concluída.\n\n"
@@ -1044,6 +1200,7 @@ class PutzCleanerApp:
             technical = payload[1] if len(payload) > 1 else ""
             if technical:
                 self._append_log(f"Erro: {technical}")
+            self.status_badge.configure(text="Erro", style="StatusError.TLabel")
             messagebox.showerror("PutzCleaner", user_message)
         elif kind == "done":
             self._on_worker_done()
@@ -1071,9 +1228,34 @@ class PutzCleanerApp:
         state = "normal" if enabled else "disabled"
         self.process_button.configure(state=state)
         self.analyze_button.configure(state=state)
+        self.advanced_button.configure(state=state)
         self.terms_text.configure(state=state)
         self.model_combo.configure(state="readonly" if enabled else "disabled")
         self.device_combo.configure(state="readonly" if enabled else "disabled")
+        self.preset_combo.configure(state="readonly" if enabled else "disabled")
+        self.status_badge.configure(
+            text="Pronto" if enabled else "Processando",
+            style="StatusReady.TLabel" if enabled else "StatusBusy.TLabel",
+        )
+
+    def _open_output_dir(self) -> None:
+        if not self._last_output_dir:
+            return
+        self._open_path(Path(self._last_output_dir))
+
+    def _open_report(self) -> None:
+        if not self._last_report_path:
+            return
+        self._open_path(Path(self._last_report_path))
+
+    def _open_path(self, path: Path) -> None:
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            else:
+                raise OSError("Abertura automática disponível apenas no Windows.")
+        except OSError as exc:
+            messagebox.showerror("PutzCleaner", f"Não foi possível abrir {path}.\n\n{exc}")
 
     # ---- Fechamento seguro (seção 20.6) ----
 
