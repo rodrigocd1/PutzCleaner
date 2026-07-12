@@ -54,15 +54,20 @@ _CONFIDENCE_HELP_TEXT = (
     "Quanto MENOR o valor, mais palavras são removidas (inclusive as duvidosas). "
     "Quanto MAIOR, mais seguro contra cortes indevidos.\n\n"
     "Exemplos de valores:\n"
-    "• 0,60  — Seguro (padrão). Corta pouco por engano, mas pode deixar passar "
+    "• 0,50  — Conservador. Corta pouco por engano, mas pode deixar passar "
     "\"né\"/\"hum\" ditos muito rápido.\n"
-    "• 0,40  — Equilibrado. Remove também vícios reconhecidos com menos certeza. "
-    "Boa escolha para a maioria das entrevistas.\n"
-    "• 0,20  — Agressivo. Pega quase tudo, até o que o modelo mal reconheceu. "
-    "Maior risco de cortar fala legítima.\n\n"
+    "• 0,35  — Equilibrado (padrão). Remove também vícios reconhecidos com "
+    "menos certeza. Boa escolha para a maioria das entrevistas.\n"
+    "• 0,20  — Agressivo. Pega quase tudo, até o que o modelo mal reconheceu.\n\n"
+    "Proteções automáticas (independem deste valor):\n"
+    "• Palavras com significado próprio (tipo, assim, então...) usam um limiar "
+    "bem mais alto e só são removidas quando cercadas de pausas.\n"
+    "• Vogais soltas (é, e, a...) exigem pausas claras dos dois lados; formas "
+    "alongadas (ééé, neee) são sempre tratadas como vício.\n"
+    "• Vícios com confiança muito baixa e colados na fala nunca são removidos.\n\n"
     "Como calibrar: se um vício aparece na transcrição (.txt) SEM a marca "
-    "[removida], veja a confiança exata dele na seção \"ignorados\" do relatório "
-    "(.json) e ajuste este valor para logo abaixo dela."
+    "[removida], veja o motivo e a confiança exata dele na seção \"ignorados\" "
+    "do relatório (.json) e ajuste este valor para logo abaixo dela."
 )
 
 _MARGIN_BEFORE_HELP_TEXT = (
@@ -87,12 +92,12 @@ PRESET_DEFAULT = "Equilibrado"
 PRESET_CUSTOM = "Personalizado"
 PRESET_CONFIGS: dict[str, dict[str, str]] = {
     "Conservador": {
-        "confidence": "0.60",
+        "confidence": "0.50",
         "margin_before": "0.03",
         "margin_after": "0.05",
     },
     PRESET_DEFAULT: {
-        "confidence": "0.40",
+        "confidence": "0.35",
         "margin_before": "0.05",
         "margin_after": "0.08",
     },

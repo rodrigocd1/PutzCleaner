@@ -79,6 +79,7 @@ def build_report(
                 "corte_final_inicio": _round(cut_start),
                 "corte_final_fim": _round(cut_end),
                 "quantidade_tokens": len(occ.token_indexes),
+                "classe_palavra": occ.word_class,
             }
         )
 
@@ -102,6 +103,9 @@ def build_report(
             "timestamp_final": _round(item.end),
             "confianca": _round(item.probability),
             "motivo": item.reason,
+            "classe_palavra": item.word_class,
+            "gap_antes": _round(item.gap_before),
+            "gap_depois": _round(item.gap_after),
         }
         for item in plan.ignored
     ]
@@ -123,6 +127,8 @@ def build_report(
             "margem_depois": _round(margin_after),
             "limiar_confianca": _round(min_probability),
             "distancia_uniao": 0.12,
+            "fusao_em_silencio": 0.40,
+            "corte_minimo": 0.08,
             "preset": preset_name,
             "modo_execucao": "analise" if analyze_only else "renderizacao",
             "deteccao_silencio": silence_detection_used,

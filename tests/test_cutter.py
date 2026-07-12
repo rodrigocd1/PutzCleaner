@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from cutter import (
     REASON_DURATION_INVALID,
     REASON_LOW_CONFIDENCE,
@@ -204,8 +206,10 @@ def test_build_cut_plan_refines_boundaries_with_silence_profile() -> None:
     plan = build_cut_plan(words, ["né"], 3.0, 0.2, 0.2, 0.6, audio_profile=profile)
 
     assert len(plan.occurrences) == 1
-    assert plan.occurrences[0].candidate_start == 0.86
-    assert plan.occurrences[0].candidate_end == 1.3
+    # Estende para dentro do silêncio retendo micro-pausa (0.05 antes, 0.075
+    # depois — metade do silêncio disponível, limitado a 0.10).
+    assert plan.occurrences[0].candidate_start == pytest.approx(0.87)
+    assert plan.occurrences[0].candidate_end == pytest.approx(1.285)
 
 
 def test_build_cut_plan_accepts_margins_above_recommended_limit() -> None:
@@ -283,6 +287,151 @@ def test_build_cut_plan_marks_incomplete_phrase_as_ignored() -> None:
     assert not plan.occurrences
     assert len(plan.ignored) == 1
     assert plan.ignored[0].reason == "frase_incompleta"
+
+
+def test_build_cut_plan_matches_nasal_filler_a() -> None:
+    # Regressão: o "ã" nasal estava sendo bloqueado pelo guarda de vogais.
+    words = [
+        _word("então", 0.0, 0.4, normalized="então"),
+        _word("ã", 1.0, 1.15, normalized="ã", probability=0.7),
+        _word("depois", 1.6, 2.0, normalized="depois"),
+    ]
+
+    plan = build_cut_plan(words, ["ã"], 3.0, 0.05, 0.08, 0.35)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].normalized_term == "ã"
+
+
+def test_build_cut_plan_protects_plain_vowel_glued_in_speech() -> None:
+    # "é" copular ("isso é bom") nunca pode ser removido, mesmo listado.
+    words = [
+        _word("isso", 0.0, 0.3, normalized="isso"),
+        _word("é", 0.31, 0.42, normalized="é", probability=0.95),
+        _word("bom", 0.43, 0.8, normalized="bom"),
+    ]
+
+    plan = build_cut_plan(words, ["é"], 2.0, 0.05, 0.08, 0.2)
+
+    assert not plan.occurrences
+    assert len(plan.ignored) == 1
+    assert plan.ignored[0].reason == "contexto_nao_isolado"
+
+
+def test_build_cut_plan_removes_isolated_plain_vowel_hesitation() -> None:
+    # "é..." como hesitação isolada por pausas largas pode ser removido.
+    words = [
+        _word("então", 0.0, 0.4, normalized="então"),
+        _word("é", 0.8, 1.0, normalized="é", probability=0.6),
+        _word("vamos", 1.4, 1.8, normalized="vamos"),
+    ]
+
+    plan = build_cut_plan(words, ["é"], 3.0, 0.05, 0.08, 0.35)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].normalized_term == "é"
+
+
+def test_build_cut_plan_lexical_requires_high_confidence() -> None:
+    # Limiar por classe: "tipo" isolado com prob 0.5 falha (lexical exige
+    # >= 0.55 mesmo com limiar base 0.2); com prob 0.8 passa.
+    words_low = [
+        _word("foi", 0.0, 0.3, normalized="foi"),
+        _word("tipo", 0.7, 1.0, normalized="tipo", probability=0.5),
+        _word("aí", 1.4, 1.7, normalized="aí"),
+    ]
+    plan_low = build_cut_plan(words_low, ["tipo"], 3.0, 0.05, 0.08, 0.2)
+    assert not plan_low.occurrences
+    assert plan_low.ignored[0].reason == REASON_LOW_CONFIDENCE
+
+    words_high = [
+        _word("foi", 0.0, 0.3, normalized="foi"),
+        _word("tipo", 0.7, 1.0, normalized="tipo", probability=0.8),
+        _word("aí", 1.4, 1.7, normalized="aí"),
+    ]
+    plan_high = build_cut_plan(words_high, ["tipo"], 3.0, 0.05, 0.08, 0.2)
+    assert len(plan_high.occurrences) == 1
+    assert plan_high.occurrences[0].word_class == "lexical"
+
+
+def test_build_cut_plan_rejects_glued_low_confidence_filler() -> None:
+    # "né" com prob 0.25 colado na fala dos dois lados costuma ser pedaço
+    # mal reconhecido de palavra real.
+    words = [
+        _word("você", 0.0, 0.3, normalized="você"),
+        _word("né", 0.31, 0.45, normalized="né", probability=0.25),
+        _word("sabe", 0.46, 0.8, normalized="sabe"),
+    ]
+
+    plan = build_cut_plan(words, ["né"], 2.0, 0.02, 0.02, 0.2)
+
+    assert not plan.occurrences
+    assert plan.ignored[0].reason == "baixa_confianca_sem_pausa"
+
+
+def test_build_cut_plan_rejects_implausible_filler_duration() -> None:
+    words = [
+        _word("antes", 0.0, 0.4, normalized="antes"),
+        _word("hum", 1.0, 2.8, normalized="hum", probability=0.9),
+        _word("depois", 3.2, 3.6, normalized="depois"),
+    ]
+
+    plan = build_cut_plan(words, ["hum"], 5.0, 0.05, 0.08, 0.35)
+
+    assert not plan.occurrences
+    assert plan.ignored[0].reason == "duracao_implausivel"
+
+
+def test_build_cut_plan_drops_cuts_below_minimum_duration() -> None:
+    words = [
+        _word("antes", 0.5, 0.9, normalized="antes"),
+        _word("né", 1.0, 1.05, normalized="né", probability=0.9),
+        _word("depois", 1.2, 1.6, normalized="depois"),
+    ]
+
+    plan = build_cut_plan(words, ["né"], 3.0, 0.0, 0.0, 0.6)
+
+    assert not plan.occurrences
+    assert not plan.cuts
+    assert plan.ignored[0].reason == "corte_muito_curto"
+    assert plan.keeps == (KeepInterval(0.0, 3.0),)
+
+
+def test_build_cut_plan_merges_cuts_separated_only_by_silence() -> None:
+    words = [
+        _word("né", 1.0, 1.2, normalized="né"),
+        _word("né", 1.55, 1.7, normalized="né"),
+        _word("tchau", 2.2, 2.6, normalized="tchau"),
+    ]
+    profile = AudioProfile(
+        silence_spans=(SilenceSpan(1.2, 1.6),),
+        noise_floor_db=-55.0,
+    )
+
+    plan_sem_perfil = build_cut_plan(words, ["né"], 4.0, 0.05, 0.08, 0.6)
+    plan_com_perfil = build_cut_plan(
+        words, ["né"], 4.0, 0.05, 0.08, 0.6, audio_profile=profile
+    )
+
+    assert len(plan_sem_perfil.cuts) == 2
+    assert len(plan_com_perfil.cuts) == 1
+    assert plan_com_perfil.cuts[0].occurrence_indexes == (0, 1)
+
+
+def test_build_cut_plan_phrase_with_lexical_part_requires_isolation() -> None:
+    # "tipo assim" emendado em fala legítima ("é tipo assim que funciona")
+    # não pode ser removido.
+    words = [
+        _word("é", 0.0, 0.1, normalized="é"),
+        _word("tipo", 0.12, 0.3, normalized="tipo"),
+        _word("assim", 0.32, 0.5, normalized="assim"),
+        _word("que", 0.52, 0.7, normalized="que"),
+    ]
+
+    plan = build_cut_plan(words, ["tipo assim"], 2.0, 0.05, 0.08, 0.6)
+
+    assert not plan.occurrences
+    assert plan.ignored[0].reason == "contexto_nao_isolado"
 
 
 def test_video_encoder_args_supports_cpu_and_nvenc() -> None:

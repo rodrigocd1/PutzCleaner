@@ -15,6 +15,7 @@ Consulte as seções 8, 11.2, 14, 15, 16, 17 e 18 do plano.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import threading
@@ -24,13 +25,20 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .detection import (
+    REASON_CONTEXT_NOT_ISOLATED,
+    REASON_DURATION_IMPLAUSIBLE,
+    REASON_LOW_CONFIDENCE_GLUED,
     REASON_PHRASE_INCOMPLETE,
+    WORD_CLASS_FILLER,
     compile_term_specs,
+    context_block_reason,
     detect_match,
     detect_phrase_match,
-    lexical_context_reason,
+    glued_low_confidence_reason,
+    max_duration_for_class,
+    min_probability_for_class,
 )
-from .audio_analysis import AudioProfile, refine_cut_bounds
+from .audio_analysis import AudioProfile, plan_cut_bounds
 from .transcriber import (
     EPSILON,
     MAX_SEGMENT_NO_SPEECH,
@@ -48,6 +56,11 @@ from .transcriber import (
 # ---------------------------------------------------------------------------
 
 MERGE_GAP_SEC = 0.12
+# Cortes separados apenas por silencio podem ser fundidos com gap maior:
+# evita rajadas de jump-cuts sem nunca fundir por cima de fala.
+SILENT_MERGE_GAP_SEC = 0.40
+# Cortes menores que isto produzem "solucos" visuais sem ganho audivel.
+MIN_CUT_DURATION_SEC = 0.08
 MAX_MARGIN_SEC = 2.00
 MAX_KEEPS_PER_GRAPH = 100
 DEFAULT_AUDIO_FADE_SEC = 0.012
@@ -67,6 +80,7 @@ REASON_DURATION_INVALID = "duracao_invalida"
 REASON_SEGMENT_UNSAFE = "segmento_inseguro"
 REASON_OVERLAP_PROTECTED = "sobreposicao_com_palavra_protegida"
 REASON_MARGIN_ATE_TARGET = "margem_eliminou_o_alvo"
+REASON_CUT_TOO_SHORT = "corte_muito_curto"
 
 
 class CutterError(RuntimeError):
@@ -126,6 +140,9 @@ class IgnoredOccurrence:
     end: float | None
     probability: float | None
     reason: str
+    word_class: str | None = None
+    gap_before: float | None = None
+    gap_after: float | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +156,7 @@ class CutOccurrence:
     probability: float
     candidate_start: float
     candidate_end: float
+    word_class: str = WORD_CLASS_FILLER
 
 
 @dataclass(frozen=True)
@@ -200,6 +218,8 @@ class _MatchedTarget:
     probability: float | None
     is_lexical: bool
     tokens: tuple[_ValidToken, ...]
+    word_class: str
+    context_mode: str
 
 
 def _clamp_interval(
@@ -383,38 +403,40 @@ def build_cut_plan(
             )
         )
 
+    # Posição de cada token na visão ordenada, para medir vizinhança.
+    position_of = {vt.index: pos for pos, vt in enumerate(valid_tokens)}
+
     for target in matched_targets:
-        context_reason = lexical_context_reason(
-            index=_find_first_token_position(valid_tokens, target.token_indexes[0]),
-            valid_tokens=valid_tokens,
-            is_lexical=target.is_lexical and len(target.token_indexes) == 1,
+        gap_before, gap_after = _neighbor_gaps(valid_tokens, position_of, target)
+        pause_before = _effective_pause(
+            audio_profile, target.word_start - gap_before, target.word_start, gap_before
         )
-        if context_reason is not None:
-            protected.extend((token.start, token.end) for token in target.tokens)
-            ignored.append(
-                IgnoredOccurrence(
-                    text=target.recognized_text,
-                    normalized=target.normalized_term,
-                    start=target.word_start,
-                    end=target.word_end,
-                    probability=target.probability,
-                    reason=context_reason,
-                )
+        pause_after = _effective_pause(
+            audio_profile, target.word_end, target.word_end + gap_after, gap_after
+        )
+
+        # Cadeia de validação v2 (plano §3): contexto → limiar por classe →
+        # plausibilidade de duração → baixa confiança colada na fala.
+        reason = context_block_reason(target.context_mode, pause_before, pause_after)
+        if reason is None:
+            class_minp = min_probability_for_class(target.word_class, minp)
+            reason = _target_confidence_reason(target.tokens, class_minp)
+        if reason is None:
+            duration = target.word_end - target.word_start
+            if duration > max_duration_for_class(target.word_class):
+                reason = REASON_DURATION_IMPLAUSIBLE
+        if reason is None and target.word_class == WORD_CLASS_FILLER:
+            reason = glued_low_confidence_reason(
+                target.probability, gap_before, gap_after
             )
-            continue
-        span_reason = _target_confidence_reason(target.tokens, minp)
-        if span_reason is None:
+
+        if reason is None:
             candidate_targets.append(target)
         else:
             protected.extend((token.start, token.end) for token in target.tokens)
             ignored.append(
-                IgnoredOccurrence(
-                    text=target.recognized_text,
-                    normalized=target.normalized_term,
-                    start=target.word_start,
-                    end=target.word_end,
-                    probability=target.probability,
-                    reason=span_reason,
+                _ignored_target(
+                    target, reason, gap_before=gap_before, gap_after=gap_after
                 )
             )
 
@@ -437,42 +459,32 @@ def build_cut_plan(
             ignored.append(_ignored_target(target, REASON_OVERLAP_PROTECTED))
             continue
 
-        candidate_start = max(0.0, word_start - mb)
-        candidate_end = min(td, word_end + ma)
-
-        # Proteger vizinha anterior: maior end <= word_start + EPSILON.
+        # Limites impostos pelas vizinhas protegidas (invariante v1).
+        limit_start = 0.0
         if not aggressive_before:
-            prev_end = None
             for ps, pe in protected:
-                if pe <= word_start + EPSILON:
-                    if prev_end is None or pe > prev_end:
-                        prev_end = pe
+                if pe <= word_start + EPSILON and pe > limit_start:
+                    limit_start = pe
                 # protected está ordenado por start; não dá para parar cedo pelo end.
-            if prev_end is not None:
-                candidate_start = max(candidate_start, prev_end)
-
-        # Proteger vizinha posterior: menor start >= word_end - EPSILON.
+        limit_end = td
         if not aggressive_after:
-            next_start = None
             for ps, pe in protected:
-                if ps >= word_end - EPSILON:
-                    if next_start is None or ps < next_start:
-                        next_start = ps
-            if next_start is not None:
-                candidate_end = min(candidate_end, next_start)
+                if ps >= word_end - EPSILON and ps < limit_end:
+                    limit_end = ps
 
-        if not aggressive_before or not aggressive_after:
-            refined_start, refined_end = refine_cut_bounds(
-                candidate_start=candidate_start,
-                candidate_end=candidate_end,
-                word_start=word_start,
-                word_end=word_end,
-                audio_profile=audio_profile,
-            )
-            if not aggressive_before:
-                candidate_start = refined_start
-            if not aggressive_after:
-                candidate_end = refined_end
+        # Bordas guiadas pelo áudio real: estende para dentro do silêncio
+        # retendo micro-pausa, ou encosta no mínimo local de energia.
+        refined_start, refined_end = plan_cut_bounds(
+            word_start=word_start,
+            word_end=word_end,
+            margin_before=mb,
+            margin_after=ma,
+            limit_start=limit_start,
+            limit_end=min(limit_end, td),
+            audio_profile=audio_profile,
+        )
+        candidate_start = max(0.0, word_start - mb) if aggressive_before else refined_start
+        candidate_end = min(td, word_end + ma) if aggressive_after else refined_end
 
         # Item 7: a proteção não pode invadir o núcleo do alvo.
         if (
@@ -511,12 +523,17 @@ def build_cut_plan(
                 probability=float(target.probability or 0.0),
                 candidate_start=candidate_start,
                 candidate_end=candidate_end,
+                word_class=target.word_class,
             )
         )
 
     # --- 16.3 União dos candidatos ---
     merge_protected = [] if aggressive_before or aggressive_after else protected
-    cuts = _merge_candidates(occurrences, merge_protected, td)
+    cuts = _merge_candidates(occurrences, merge_protected, td, audio_profile)
+
+    # --- 16.3b Cortes curtos demais viram ignorados (plano v2 §2.5) ---
+    occurrences, cuts, short_ignored = _drop_short_cuts(occurrences, cuts)
+    ignored.extend(short_ignored)
 
     # --- 16.4 Complemento preservado ---
     keeps = _build_keeps(cuts, td)
@@ -534,6 +551,97 @@ def build_cut_plan(
     )
 
 
+def _neighbor_gaps(
+    valid_tokens: Sequence[_ValidToken],
+    position_of: dict[int, int],
+    target: _MatchedTarget,
+) -> tuple[float, float]:
+    """Gaps temporais até o token vizinho de cada lado (inf nas bordas)."""
+
+    first_pos = position_of.get(target.token_indexes[0], 0)
+    last_pos = position_of.get(target.token_indexes[-1], first_pos)
+
+    gap_before = float("inf")
+    if first_pos > 0:
+        gap_before = max(0.0, target.word_start - valid_tokens[first_pos - 1].end)
+    gap_after = float("inf")
+    if last_pos + 1 < len(valid_tokens):
+        gap_after = max(0.0, valid_tokens[last_pos + 1].start - target.word_end)
+    return gap_before, gap_after
+
+
+def _effective_pause(
+    audio_profile: AudioProfile | None,
+    gap_start: float,
+    gap_end: float,
+    raw_gap: float,
+) -> float:
+    """Pausa efetiva no gap: confirmada por silêncio quando há perfil.
+
+    Sem perfil (ou perfil sem silêncios detectáveis) usa o gap entre
+    timestamps. Com perfil, só conta o tempo realmente silencioso — gaps do
+    ASR mentem em fala rápida.
+    """
+
+    if not math.isfinite(raw_gap):
+        return raw_gap
+    if audio_profile is None or not audio_profile.silence_spans:
+        return raw_gap
+    return min(raw_gap, audio_profile.silence_overlap(gap_start, gap_end))
+
+
+def _drop_short_cuts(
+    occurrences: list[CutOccurrence],
+    cuts: list[CutInterval],
+    min_duration: float = MIN_CUT_DURATION_SEC,
+) -> tuple[list[CutOccurrence], list[CutInterval], list[IgnoredOccurrence]]:
+    """Descarta cortes menores que ``min_duration`` reindexando o restante."""
+
+    short = [cut for cut in cuts if cut.end - cut.start < min_duration]
+    if not short:
+        return occurrences, cuts, []
+
+    dropped: set[int] = set()
+    for cut in short:
+        dropped.update(cut.occurrence_indexes)
+
+    ignored = [
+        IgnoredOccurrence(
+            text=occurrences[i].recognized_text,
+            normalized=occurrences[i].normalized_term,
+            start=occurrences[i].word_start,
+            end=occurrences[i].word_end,
+            probability=occurrences[i].probability,
+            reason=REASON_CUT_TOO_SHORT,
+            word_class=occurrences[i].word_class,
+        )
+        for i in sorted(dropped)
+    ]
+
+    remap: dict[int, int] = {}
+    kept_occurrences: list[CutOccurrence] = []
+    for i, occ in enumerate(occurrences):
+        if i in dropped:
+            continue
+        remap[i] = len(kept_occurrences)
+        kept_occurrences.append(occ)
+
+    kept_cuts: list[CutInterval] = []
+    for cut in cuts:
+        if cut.end - cut.start < min_duration:
+            continue
+        kept_cuts.append(
+            CutInterval(
+                id=len(kept_cuts) + 1,
+                start=cut.start,
+                end=cut.end,
+                occurrence_indexes=tuple(remap[i] for i in cut.occurrence_indexes),
+            )
+        )
+
+    return kept_occurrences, kept_cuts, ignored
+
+
 def _ignored_from(vt: _ValidToken, reason: str) -> IgnoredOccurrence:
     return IgnoredOccurrence(
         text=vt.token.text,
@@ -545,7 +653,17 @@ def _ignored_from(vt: _ValidToken, reason: str) -> IgnoredOccurrence:
     )
 
 
-def _ignored_target(target: _MatchedTarget, reason: str) -> IgnoredOccurrence:
+def _ignored_target(
+    target: _MatchedTarget,
+    reason: str,
+    gap_before: float | None = None,
+    gap_after: float | None = None,
+) -> IgnoredOccurrence:
+    def _finite(value: float | None) -> float | None:
+        if value is None or not math.isfinite(value):
+            return None
+        return value
+
     return IgnoredOccurrence(
         text=target.recognized_text,
         normalized=target.normalized_term,
@@ -553,6 +671,9 @@ def _ignored_target(target: _MatchedTarget, reason: str) -> IgnoredOccurrence:
         end=target.word_end,
         probability=target.probability,
         reason=reason,
+        word_class=target.word_class,
+        gap_before=_finite(gap_before),
+        gap_after=_finite(gap_after),
     )
 
 
@@ -565,13 +686,6 @@ def _target_confidence_reason(
         if reason is not None:
             return reason
     return None
-
-
-def _find_first_token_position(valid_tokens: Sequence[_ValidToken], word_index: int) -> int:
-    for position, vt in enumerate(valid_tokens):
-        if vt.index == word_index:
-            return position
-    return 0
 
 
 def _collect_matched_targets(
@@ -605,6 +719,8 @@ def _collect_matched_targets(
                     probability=_min_probability(window),
                     is_lexical=False,
                     tokens=window,
+                    word_class=spec.word_class,
+                    context_mode=spec.context_mode,
                 )
                 consumed_positions.update(range(position, position + spec.token_count))
                 break
@@ -622,6 +738,8 @@ def _collect_matched_targets(
                 probability=vt.token.probability,
                 is_lexical=spec.is_lexical,
                 tokens=(vt,),
+                word_class=match.word_class,
+                context_mode=match.context_mode,
             )
             consumed_positions.add(position)
             break
@@ -645,6 +763,7 @@ def _merge_candidates(
     occurrences: list[CutOccurrence],
     protected: list[tuple[float, float]],
     timeline_duration: float,
+    audio_profile: AudioProfile | None = None,
 ) -> list[CutInterval]:
     if not occurrences:
         return []
@@ -670,6 +789,13 @@ def _merge_candidates(
         union_start = min(cur_start, occ.candidate_start)
         union_end = max(cur_end, occ.candidate_end)
         near = occ.candidate_start <= cur_end + MERGE_GAP_SEC
+        if not near and audio_profile is not None:
+            # Gap maior é fundível quando é só silêncio: evita dois
+            # jump-cuts em sequência separados por uma "ilha" muda.
+            gap = occ.candidate_start - cur_end
+            near = gap <= SILENT_MERGE_GAP_SEC and audio_profile.is_silent_between(
+                cur_end, occ.candidate_start
+            )
         safe = not protected_intersects(union_start, union_end)
 
         if near and safe:
