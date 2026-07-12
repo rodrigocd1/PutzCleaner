@@ -23,9 +23,8 @@ def test_validate_terms_deduplicates_and_normalizes() -> None:
     assert terms == ("né", "hum")
 
 
-def test_validate_terms_rejects_whitespace_inside_term() -> None:
-    with pytest.raises(TermValidationError):
-        validate_terms(["tipo assim"])
+def test_validate_terms_accepts_short_phrase() -> None:
+    assert validate_terms(["tipo assim"]) == ("tipo assim",)
 
 
 def test_validate_terms_rejects_empty_input() -> None:

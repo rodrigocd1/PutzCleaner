@@ -126,6 +126,16 @@ def normalize_token(value: str) -> str:
     return text.strip()
 
 
+def normalize_term(value: str) -> str:
+    """Normaliza um termo configurado, permitindo frases curtas."""
+
+    if not isinstance(value, str):
+        raise TypeError("normalize_term espera str")
+    pieces = [normalize_token(part) for part in value.split()]
+    pieces = [part for part in pieces if part]
+    return " ".join(pieces)
+
+
 class TermValidationError(ValueError):
     """Erro de validação da lista editável de palavras."""
 
@@ -135,7 +145,6 @@ def validate_terms(raw_lines: Iterable[str]) -> tuple[str, ...]:
 
     - uma entrada por linha;
     - remove linhas vazias;
-    - rejeita whitespace interno;
     - rejeita entrada que normalize para vazio;
     - rejeita mais de ``MAX_TERM_LENGTH`` caracteres (na forma original);
     - deduplica pela forma normalizada preservando a ordem;
@@ -153,10 +162,7 @@ def validate_terms(raw_lines: Iterable[str]) -> tuple[str, ...]:
             raise TermValidationError(
                 f"A entrada '{stripped[:20]}...' excede {MAX_TERM_LENGTH} caracteres."
             )
-        # Whitespace interno indica mais de uma palavra por linha.
-        if any(ch.isspace() for ch in stripped):
-            raise TermValidationError("Use apenas uma palavra ou som por linha.")
-        normalized = normalize_token(stripped)
+        normalized = normalize_term(stripped)
         if not normalized:
             raise TermValidationError(
                 f"A entrada '{stripped}' não contém uma palavra válida."

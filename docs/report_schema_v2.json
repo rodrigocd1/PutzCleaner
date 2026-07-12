@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PutzCleaner Report v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "gerado_em",
+    "arquivo_original",
+    "arquivo_gerado",
+    "configuracao",
+    "midia",
+    "resumo",
+    "ocorrencias",
+    "cortes",
+    "ignorados",
+    "ferramentas",
+    "avisos"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "status": { "type": "string" },
+    "gerado_em": { "type": "string" },
+    "arquivo_original": { "type": "string" },
+    "arquivo_gerado": { "type": "string" },
+    "configuracao": { "type": "object" },
+    "midia": { "type": "object" },
+    "resumo": { "type": "object" },
+    "ocorrencias": { "type": "array" },
+    "cortes": { "type": "array" },
+    "ignorados": { "type": "object" },
+    "ferramentas": { "type": "object" },
+    "avisos": { "type": "array" }
+  }
+}

@@ -25,7 +25,7 @@ def test_build_transcript_marks_removed_word() -> None:
         _word("tudo", "tudo", 0.6, 0.9, 0),
     ]
     occurrences = [
-        CutOccurrence("né", "né", "né", 0.4, 0.5, 0.8, 0.35, 0.58),
+        CutOccurrence("né", "né", "né", (1,), 0.4, 0.5, 0.8, 0.35, 0.58),
     ]
 
     transcript = build_transcript(
@@ -38,3 +38,25 @@ def test_build_transcript_marks_removed_word() -> None:
 
     assert "né [removida 00:00:00.400]" in transcript
     assert "Total de palavras removidas: 1" in transcript
+
+
+def test_build_transcript_marks_all_words_from_phrase() -> None:
+    words = [
+        _word("tipo", "tipo", 0.4, 0.5, 0),
+        _word("assim", "assim", 0.55, 0.7, 0),
+    ]
+    occurrences = [
+        CutOccurrence("tipo assim", "tipo assim", "tipo assim", (0, 1), 0.4, 0.7, 0.8, 0.35, 0.76),
+    ]
+
+    transcript = build_transcript(
+        words,
+        occurrences,
+        input_name="entrada.mp4",
+        model_label="small (small)",
+        device_label="cpu",
+    )
+
+    assert "tipo [removida 00:00:00.400]" in transcript
+    assert "assim [removida 00:00:00.550]" in transcript
+    assert "Total de palavras removidas: 2" in transcript

@@ -17,9 +17,6 @@ from typing import Sequence
 from .cutter import CutOccurrence
 from .transcriber import WordToken
 
-_MATCH_TOLERANCE_SEC = 0.05
-
-
 def _fmt_ts(seconds: float | None) -> str:
     if seconds is None:
         return "--:--:--.---"
@@ -40,21 +37,7 @@ def _removed_word_indexes(
 
     removed: set[int] = set()
     for occ in occurrences:
-        best_index = -1
-        best_delta = _MATCH_TOLERANCE_SEC
-        for i, word in enumerate(words):
-            if i in removed:
-                continue
-            if word.normalized != occ.normalized_term:
-                continue
-            if word.start is None or word.end is None:
-                continue
-            delta = abs(word.start - occ.word_start) + abs(word.end - occ.word_end)
-            if delta <= best_delta:
-                best_delta = delta
-                best_index = i
-        if best_index >= 0:
-            removed.add(best_index)
+        removed.update(occ.token_indexes)
     return removed
 
 

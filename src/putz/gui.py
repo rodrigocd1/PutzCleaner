@@ -135,6 +135,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "limiar_confianca": 0.60,
     "pasta_saida": "",
     "modo_preset": PRESET_DEFAULT,
+    "usar_encoder_gpu": False,
 }
 
 
@@ -153,6 +154,8 @@ class ProcessingOptions:
     margin_before: float
     margin_after: float
     min_probability: float
+    preset_name: str = PRESET_DEFAULT
+    use_gpu_encoder: bool = False
     analyze_only: bool = False
 
 
@@ -241,6 +244,8 @@ def load_config(project_root: Path) -> tuple[dict[str, Any], list[str], bool]:
     else:
         config["modo_preset"] = PRESET_DEFAULT
 
+    config["usar_encoder_gpu"] = bool(data.get("usar_encoder_gpu", False))
+
     # pasta_saida
     pasta = data.get("pasta_saida", "")
     if isinstance(pasta, str):
@@ -264,6 +269,7 @@ def save_config(project_root: Path, config: dict[str, Any]) -> None:
         "margem_depois": float(config["margem_depois"]),
         "limiar_confianca": float(config.get("limiar_confianca", 0.60)),
         "modo_preset": config.get("modo_preset", PRESET_DEFAULT),
+        "usar_encoder_gpu": bool(config.get("usar_encoder_gpu", False)),
         "pasta_saida": config.get("pasta_saida", ""),
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
@@ -336,6 +342,7 @@ def run_worker(
     published_report = False
     published_transcript = False
     cache = TranscriptionCache(project_root / "models" / ".transcription_cache")
+    cache_hit = False
 
     def log(msg: str) -> None:
         emit("log", msg)
@@ -374,11 +381,18 @@ def run_worker(
         ):
             raise CutterError("O vídeo de saída não pode ser igual ao de entrada.")
 
-        _check_collision(final_video, final_report, final_transcript)
+        if options.analyze_only:
+            _check_collision(final_report, final_transcript)
+        else:
+            _check_collision(final_video, final_report, final_transcript)
 
         emit("progress", 3.0)
         toolchain = resolve_toolchain(project_root)
         log(f"FFmpeg: {toolchain.ffmpeg_version}")
+        log(
+            "NVENC disponível." if toolchain.nvenc_available
+            else "NVENC indisponível; render em CPU/libx264."
+        )
 
         media_info = probe_media(toolchain, input_path)
         log(
@@ -435,6 +449,7 @@ def run_worker(
             )
             cache.save(cache_key, result)
         else:
+            cache_hit = True
             log("Cache de transcricao: hit.")
             emit("progress_mode", "determinate")
             emit("progress", 60.0)
@@ -479,6 +494,8 @@ def run_worker(
                 actual_duration=plan.expected_output_duration,
                 video_codec="analise",
                 audio_codec="analise",
+                encoder_used="analise",
+                render_mode="analise",
             )
             emit("progress", 97.0)
         else:
@@ -495,6 +512,7 @@ def run_worker(
                 plan,
                 staged_video,
                 Path(work_dir),
+                options.use_gpu_encoder,
                 cancel_event,
                 log,
                 render_progress,
@@ -517,6 +535,10 @@ def run_worker(
             margin_before=options.margin_before,
             margin_after=options.margin_after,
             min_probability=options.min_probability,
+            preset_name=options.preset_name,
+            analyze_only=options.analyze_only,
+            silence_detection_used=audio_profile is not None,
+            cache_hit=cache_hit,
             faster_whisper_version=_faster_whisper_version(),
             ffmpeg_version=toolchain.ffmpeg_version,
         )
@@ -813,6 +835,13 @@ class PutzCleanerApp:
         ttk.Entry(opts, textvariable=self.margin_after_var, width=8).grid(
             row=0, column=7
         )
+        self.gpu_encoder_var = tk.BooleanVar(value=False)
+        self.gpu_encoder_check = ttk.Checkbutton(
+            opts,
+            text="Usar encoder GPU (NVENC)",
+            variable=self.gpu_encoder_var,
+        )
+        self.gpu_encoder_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
         r += 1
 
         opts2 = ttk.Frame(self.advanced_frame)
@@ -924,6 +953,7 @@ class PutzCleanerApp:
         self.margin_before_var.set(str(self.config["margem_antes"]))
         self.margin_after_var.set(str(self.config["margem_depois"]))
         self.confidence_var.set(str(self.config.get("limiar_confianca", 0.60)))
+        self.gpu_encoder_var.set(bool(self.config.get("usar_encoder_gpu", False)))
         pasta = self.config.get("pasta_saida", "")
         if pasta:
             self.output_var.set(pasta)
@@ -1040,6 +1070,7 @@ class PutzCleanerApp:
         self.config["margem_depois"] = options.margin_after
         self.config["limiar_confianca"] = options.min_probability
         self.config["modo_preset"] = self.preset_var.get().strip() or PRESET_DEFAULT
+        self.config["usar_encoder_gpu"] = options.use_gpu_encoder
         self.config["pasta_saida"] = (
             "" if self.output_var.get() == "Mesma pasta do vídeo"
             else str(options.output_directory)
@@ -1125,6 +1156,8 @@ class PutzCleanerApp:
             margin_before=margin_before,
             margin_after=margin_after,
             min_probability=min_probability,
+            preset_name=self.preset_var.get().strip() or PRESET_DEFAULT,
+            use_gpu_encoder=bool(self.gpu_encoder_var.get()),
         )
 
     # ---- Fila de eventos ----
@@ -1233,6 +1266,7 @@ class PutzCleanerApp:
         self.model_combo.configure(state="readonly" if enabled else "disabled")
         self.device_combo.configure(state="readonly" if enabled else "disabled")
         self.preset_combo.configure(state="readonly" if enabled else "disabled")
+        self.gpu_encoder_check.configure(state=state)
         self.status_badge.configure(
             text="Pronto" if enabled else "Processando",
             style="StatusReady.TLabel" if enabled else "StatusBusy.TLabel",

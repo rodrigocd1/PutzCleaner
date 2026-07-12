@@ -17,7 +17,7 @@ from typing import Mapping
 
 from .cutter import CutPlan, MediaInfo, RenderResult
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _round(value: float | None, digits: int = 3) -> float | None:
@@ -41,8 +41,12 @@ def build_report(
     margin_before: float,
     margin_after: float,
     min_probability: float = 0.60,
-    faster_whisper_version: str,
-    ffmpeg_version: str,
+    preset_name: str = "Personalizado",
+    analyze_only: bool = False,
+    silence_detection_used: bool = False,
+    cache_hit: bool = False,
+    faster_whisper_version: str = "",
+    ffmpeg_version: str = "",
     warnings: list[str] | None = None,
     generated_at: datetime | None = None,
 ) -> dict[str, object]:
@@ -64,6 +68,7 @@ def build_report(
                 "palavra_removida": occ.configured_term,
                 "palavra_configurada": occ.configured_term,
                 "palavra_normalizada": occ.normalized_term,
+                "token_indexes": list(occ.token_indexes),
                 "texto_reconhecido": occ.recognized_text,
                 "timestamp_inicial": _round(occ.word_start),
                 "timestamp_final": _round(occ.word_end),
@@ -73,6 +78,7 @@ def build_report(
                 "candidato_fim": _round(occ.candidate_end),
                 "corte_final_inicio": _round(cut_start),
                 "corte_final_fim": _round(cut_end),
+                "quantidade_tokens": len(occ.token_indexes),
             }
         )
 
@@ -117,6 +123,9 @@ def build_report(
             "margem_depois": _round(margin_after),
             "limiar_confianca": _round(min_probability),
             "distancia_uniao": 0.12,
+            "preset": preset_name,
+            "modo_execucao": "analise" if analyze_only else "renderizacao",
+            "deteccao_silencio": silence_detection_used,
         },
         "midia": {
             "duracao_formato_original": _round(media_info.format_duration),
@@ -125,11 +134,14 @@ def build_report(
             "duracao_saida_real": _round(render.actual_duration),
             "codec_video": render.video_codec,
             "codec_audio": render.audio_codec,
+            "encoder_video": render.encoder_used,
+            "modo_render": render.render_mode,
         },
         "resumo": {
             "total_ocorrencias": len(plan.occurrences),
             "total_cortes": len(plan.cuts),
             "duracao_total_removida": _round(total_removido),
+            "cache_transcricao": "hit" if cache_hit else "miss",
         },
         "ocorrencias": ocorrencias,
         "cortes": cortes,

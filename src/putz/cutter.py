@@ -24,8 +24,10 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .detection import (
+    REASON_PHRASE_INCOMPLETE,
     compile_term_specs,
     detect_match,
+    detect_phrase_match,
     lexical_context_reason,
 )
 from .audio_analysis import AudioProfile, refine_cut_bounds
@@ -91,6 +93,7 @@ class Toolchain:
     ffmpeg_version: str
     ffprobe_version: str
     filter_file_option: str
+    nvenc_available: bool
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,7 @@ class CutOccurrence:
     configured_term: str
     recognized_text: str
     normalized_term: str
+    token_indexes: tuple[int, ...]
     word_start: float
     word_end: float
     probability: float
@@ -166,6 +170,8 @@ class RenderResult:
     actual_duration: float
     video_codec: str
     audio_codec: str
+    encoder_used: str = "libx264"
+    render_mode: str = "render"
 
 
 # ===========================================================================
@@ -181,6 +187,19 @@ class _ValidToken:
     start: float
     end: float
     token: WordToken
+
+
+@dataclass(frozen=True)
+class _MatchedTarget:
+    token_indexes: tuple[int, ...]
+    configured_term: str
+    normalized_term: str
+    recognized_text: str
+    word_start: float
+    word_end: float
+    probability: float | None
+    is_lexical: bool
+    tokens: tuple[_ValidToken, ...]
 
 
 def _clamp_interval(
@@ -312,47 +331,65 @@ def build_cut_plan(
     # Ordenar tokens válidos por (start, end, segment_id) sem arredondar.
     valid_tokens.sort(key=lambda vt: (vt.start, vt.end, vt.token.segment_id))
 
+    matched_targets, phrase_ignored = _collect_matched_targets(valid_tokens, term_specs)
+
     # --- Classificar em alvos-candidatos e palavras protegidas ---
     # Protegidas: não-alvos válidos + alvos que falham no critério de confiança.
-    candidate_targets: list[tuple[_ValidToken, str, str]] = []
+    candidate_targets: list[_MatchedTarget] = []
     protected: list[tuple[float, float]] = []
+    consumed_indexes = {index for target in matched_targets for index in target.token_indexes}
 
-    for index, vt in enumerate(valid_tokens):
-        match = detect_match(vt.token, term_specs)
-        if match is None:
+    for vt in valid_tokens:
+        if vt.index not in consumed_indexes:
             protected.append((vt.start, vt.end))
-            continue
+
+    for vt, _normalized in phrase_ignored:
+        protected.append((vt.start, vt.end))
+
+    for vt, normalized in phrase_ignored:
+        ignored.append(
+            IgnoredOccurrence(
+                text=vt.token.text,
+                normalized=normalized,
+                start=vt.start,
+                end=vt.end,
+                probability=vt.token.probability,
+                reason=REASON_PHRASE_INCOMPLETE,
+            )
+        )
+
+    for target in matched_targets:
         context_reason = lexical_context_reason(
-            index=index,
+            index=_find_first_token_position(valid_tokens, target.token_indexes[0]),
             valid_tokens=valid_tokens,
-            is_lexical=match.normalized_term in {"tipo", "assim"},
+            is_lexical=target.is_lexical and len(target.token_indexes) == 1,
         )
         if context_reason is not None:
-            protected.append((vt.start, vt.end))
+            protected.extend((token.start, token.end) for token in target.tokens)
             ignored.append(
                 IgnoredOccurrence(
-                    text=vt.token.text,
-                    normalized=match.normalized_term,
-                    start=vt.start,
-                    end=vt.end,
-                    probability=vt.token.probability,
+                    text=target.recognized_text,
+                    normalized=target.normalized_term,
+                    start=target.word_start,
+                    end=target.word_end,
+                    probability=target.probability,
                     reason=context_reason,
                 )
             )
             continue
-        reason = _confidence_reason(vt.token, minp)
-        if reason is None:
-            candidate_targets.append((vt, match.configured_term, match.normalized_term))
+        span_reason = _target_confidence_reason(target.tokens, minp)
+        if span_reason is None:
+            candidate_targets.append(target)
         else:
-            protected.append((vt.start, vt.end))
+            protected.extend((token.start, token.end) for token in target.tokens)
             ignored.append(
                 IgnoredOccurrence(
-                    text=vt.token.text,
-                    normalized=match.normalized_term,
-                    start=vt.start,
-                    end=vt.end,
-                    probability=vt.token.probability,
-                    reason=reason,
+                    text=target.recognized_text,
+                    normalized=target.normalized_term,
+                    start=target.word_start,
+                    end=target.word_end,
+                    probability=target.probability,
+                    reason=span_reason,
                 )
             )
 
@@ -361,8 +398,8 @@ def build_cut_plan(
     # --- 16.2 Avaliação dos alvos ---
     occurrences: list[CutOccurrence] = []
 
-    for vt, configured_term, normalized_term in candidate_targets:
-        word_start, word_end = vt.start, vt.end
+    for target in candidate_targets:
+        word_start, word_end = target.word_start, target.word_end
 
         # Item 12: núcleo não pode sobrepor palavra protegida.
         core_overlaps = any(
@@ -370,7 +407,7 @@ def build_cut_plan(
             for ps, pe in protected
         )
         if core_overlaps:
-            ignored.append(_ignored_from(vt, REASON_OVERLAP_PROTECTED))
+            ignored.append(_ignored_target(target, REASON_OVERLAP_PROTECTED))
             continue
 
         candidate_start = max(0.0, word_start - mb)
@@ -409,7 +446,7 @@ def build_cut_plan(
             or candidate_end < word_end - EPSILON
             or candidate_end <= candidate_start + EPSILON
         ):
-            ignored.append(_ignored_from(vt, REASON_MARGIN_ATE_TARGET))
+            ignored.append(_ignored_target(target, REASON_MARGIN_ATE_TARGET))
             continue
 
         # Item 8: revalidar que o candidato inteiro não intersecta protegida.
@@ -417,17 +454,18 @@ def build_cut_plan(
             _intervals_overlap(candidate_start, candidate_end, ps, pe) > EPSILON
             for ps, pe in protected
         ):
-            ignored.append(_ignored_from(vt, REASON_OVERLAP_PROTECTED))
+            ignored.append(_ignored_target(target, REASON_OVERLAP_PROTECTED))
             continue
 
         occurrences.append(
             CutOccurrence(
-                configured_term=configured_term,
-                recognized_text=vt.token.text,
-                normalized_term=normalized_term,
+                configured_term=target.configured_term,
+                recognized_text=target.recognized_text,
+                normalized_term=target.normalized_term,
+                token_indexes=target.token_indexes,
                 word_start=word_start,
                 word_end=word_end,
-                probability=float(vt.token.probability),
+                probability=float(target.probability or 0.0),
                 candidate_start=candidate_start,
                 candidate_end=candidate_end,
             )
@@ -461,6 +499,102 @@ def _ignored_from(vt: _ValidToken, reason: str) -> IgnoredOccurrence:
         probability=vt.token.probability,
         reason=reason,
     )
+
+
+def _ignored_target(target: _MatchedTarget, reason: str) -> IgnoredOccurrence:
+    return IgnoredOccurrence(
+        text=target.recognized_text,
+        normalized=target.normalized_term,
+        start=target.word_start,
+        end=target.word_end,
+        probability=target.probability,
+        reason=reason,
+    )
+
+
+def _target_confidence_reason(
+    tokens: Sequence[_ValidToken],
+    min_probability: float,
+) -> str | None:
+    for token in tokens:
+        reason = _confidence_reason(token.token, min_probability)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _find_first_token_position(valid_tokens: Sequence[_ValidToken], word_index: int) -> int:
+    for position, vt in enumerate(valid_tokens):
+        if vt.index == word_index:
+            return position
+    return 0
+
+
+def _collect_matched_targets(
+    valid_tokens: Sequence[_ValidToken],
+    term_specs,
+) -> tuple[list[_MatchedTarget], list[tuple[_ValidToken, str]]]:
+    matches: list[_MatchedTarget] = []
+    phrase_ignored: list[tuple[_ValidToken, str]] = []
+    consumed_positions: set[int] = set()
+
+    for position, vt in enumerate(valid_tokens):
+        if position in consumed_positions:
+            continue
+        matched_target: _MatchedTarget | None = None
+        pending_phrase_normalized: str | None = None
+        for spec in term_specs:
+            if spec.token_count > 1:
+                phrase_indexes = detect_phrase_match(valid_tokens, position, spec)
+                if phrase_indexes is None:
+                    if vt.token.normalized == spec.parts[0]:
+                        pending_phrase_normalized = spec.normalized
+                    continue
+                window = tuple(valid_tokens[position : position + spec.token_count])
+                matched_target = _MatchedTarget(
+                    token_indexes=phrase_indexes,
+                    configured_term=spec.configured,
+                    normalized_term=spec.normalized,
+                    recognized_text=" ".join(token.token.text.strip() for token in window).strip(),
+                    word_start=window[0].start,
+                    word_end=window[-1].end,
+                    probability=_min_probability(window),
+                    is_lexical=False,
+                    tokens=window,
+                )
+                consumed_positions.update(range(position, position + spec.token_count))
+                break
+
+            match = detect_match(vt.token, (spec,))
+            if match is None:
+                continue
+            matched_target = _MatchedTarget(
+                token_indexes=(vt.index,),
+                configured_term=match.configured_term,
+                normalized_term=match.normalized_term,
+                recognized_text=vt.token.text,
+                word_start=vt.start,
+                word_end=vt.end,
+                probability=vt.token.probability,
+                is_lexical=spec.is_lexical,
+                tokens=(vt,),
+            )
+            consumed_positions.add(position)
+            break
+
+        if matched_target is not None:
+            matches.append(matched_target)
+        elif pending_phrase_normalized is not None:
+            phrase_ignored.append((vt, pending_phrase_normalized))
+
+    return matches, phrase_ignored
+
+
+def _min_probability(tokens: Sequence[_ValidToken]) -> float | None:
+    values = [token.token.probability for token in tokens if token.token.probability is not None]
+    if not values:
+        return None
+    return min(values)
 
 
 def _merge_candidates(
@@ -638,6 +772,7 @@ def _validate_toolchain(ffmpeg: Path, ffprobe: Path) -> Toolchain:
         raise CutterError("Encoder aac ausente.")
 
     filter_option = _detect_filter_file_option(ffmpeg)
+    nvenc_available = _detect_nvenc_available(ffmpeg, encoders_text)
 
     return Toolchain(
         ffmpeg=ffmpeg,
@@ -645,6 +780,7 @@ def _validate_toolchain(ffmpeg: Path, ffprobe: Path) -> Toolchain:
         ffmpeg_version=ffmpeg_version,
         ffprobe_version=ffprobe_version,
         filter_file_option=filter_option,
+        nvenc_available=nvenc_available,
     )
 
 
@@ -710,6 +846,48 @@ def _detect_filter_file_option(ffmpeg: Path) -> str:
     raise CutterError(
         "Nenhuma forma de carregar filtergraph por arquivo funcionou."
     )
+
+
+def _detect_nvenc_available(ffmpeg: Path, encoders_text: str) -> bool:
+    if not _has_encoder(encoders_text, "h264_nvenc"):
+        return False
+
+    import tempfile
+
+    tmpdir = tempfile.mkdtemp(prefix=".putzcleaner-nvenc-")
+    out_file = Path(tmpdir) / "nvenc_test.mp4"
+    args = [
+        str(ffmpeg),
+        "-hide_banner",
+        "-nostdin",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=64x64:d=0.1",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=16000:cl=mono",
+        "-t",
+        "0.1",
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p5",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        str(out_file),
+    ]
+    try:
+        result = _run_short(args, timeout=_SUBPROCESS_TIMEOUT_SHORT)
+        return result.returncode == 0 and out_file.is_file()
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        _safe_rmtree(Path(tmpdir))
 
 
 def _safe_rmtree(path: Path) -> None:
@@ -991,6 +1169,30 @@ def _audio_segment_filters(keep: KeepInterval, audio_fade_sec: float) -> str:
     )
 
 
+def _video_encoder_args(encoder_used: str) -> list[str]:
+    if encoder_used == "h264_nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-rc",
+            "vbr",
+            "-cq",
+            "23",
+            "-b:v",
+            "0",
+        ]
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+    ]
+
+
 def render_video(
     toolchain: Toolchain,
     media_info: MediaInfo,
@@ -998,6 +1200,7 @@ def render_video(
     plan: CutPlan,
     staged_video: Path,
     work_dir: Path,
+    prefer_gpu_encoder: bool,
     cancel_event: threading.Event,
     log_callback: Callable[[str], None],
     progress_callback: Callable[[float], None],
@@ -1005,6 +1208,7 @@ def render_video(
     """Renderiza o MP4 final (rota única ou em lotes) e o verifica."""
 
     keeps = plan.keeps
+    encoder_used = _select_video_encoder(toolchain, prefer_gpu_encoder, log_callback)
     if len(keeps) <= MAX_KEEPS_PER_GRAPH:
         _render_single_graph(
             toolchain,
@@ -1014,6 +1218,7 @@ def render_video(
             staged_video,
             work_dir,
             plan.expected_output_duration,
+            encoder_used,
             cancel_event,
             log_callback,
             progress_callback,
@@ -1027,12 +1232,34 @@ def render_video(
             staged_video,
             work_dir,
             plan.expected_output_duration,
+            encoder_used,
             cancel_event,
             log_callback,
             progress_callback,
         )
 
-    return verify_output(toolchain, staged_video, plan.expected_output_duration, media_info)
+    return verify_output(
+        toolchain,
+        staged_video,
+        plan.expected_output_duration,
+        media_info,
+        encoder_used,
+    )
+
+
+def _select_video_encoder(
+    toolchain: Toolchain,
+    prefer_gpu_encoder: bool,
+    log_callback: Callable[[str], None],
+) -> str:
+    if prefer_gpu_encoder:
+        if toolchain.nvenc_available:
+            log_callback("Encoder de vídeo: h264_nvenc.")
+            return "h264_nvenc"
+        log_callback("Encoder GPU solicitado, mas NVENC não está disponível. Usando libx264.")
+    else:
+        log_callback("Encoder de vídeo: libx264.")
+    return "libx264"
 
 
 def _render_single_graph(
@@ -1043,6 +1270,7 @@ def _render_single_graph(
     staged_video,
     work_dir,
     expected_duration,
+    encoder_used,
     cancel_event,
     log_callback,
     progress_callback,
@@ -1069,12 +1297,7 @@ def _render_single_graph(
         "[vout]",
         "-map",
         "[aout]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "20",
+        *_video_encoder_args(encoder_used),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -1118,6 +1341,7 @@ def _render_batches(
     staged_video,
     work_dir,
     expected_duration,
+    encoder_used,
     cancel_event,
     log_callback,
     progress_callback,
@@ -1176,12 +1400,7 @@ def _render_batches(
             "[vout]",
             "-map",
             "[aout]",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "20",
+            *_video_encoder_args(encoder_used),
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -1417,6 +1636,7 @@ def verify_output(
     path: Path,
     expected_duration: float,
     media_info: MediaInfo,
+    encoder_used: str,
 ) -> RenderResult:
     if not path.is_file() or path.stat().st_size == 0:
         raise CutterError("O vídeo final não foi gerado.")
@@ -1471,6 +1691,7 @@ def verify_output(
         actual_duration=actual,
         video_codec=video_codec,
         audio_codec=audio_codec,
+        encoder_used=encoder_used,
     )
 
 

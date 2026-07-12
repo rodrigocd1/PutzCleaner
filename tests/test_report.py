@@ -29,7 +29,7 @@ def test_build_report_snapshot_like_payload() -> None:
     )
     plan = CutPlan(
         occurrences=(
-            CutOccurrence("né", "né", "né", 1.0, 1.2, 0.91, 0.95, 1.28),
+            CutOccurrence("né", "né", "né", (3,), 1.0, 1.2, 0.91, 0.95, 1.28),
         ),
         ignored=(
             IgnoredOccurrence("assim", "assim", 2.0, 2.2, 0.3, "baixa_confianca"),
@@ -57,16 +57,22 @@ def test_build_report_snapshot_like_payload() -> None:
         margin_before=0.05,
         margin_after=0.08,
         min_probability=0.6,
+        preset_name="Equilibrado",
+        analyze_only=False,
+        silence_detection_used=True,
+        cache_hit=True,
         faster_whisper_version="1.2.1",
         ffmpeg_version="ffmpeg test",
         generated_at=datetime.fromisoformat("2026-07-11T21:45:00-03:00"),
     )
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["resumo"] == {
+        "cache_transcricao": "hit",
         "total_ocorrencias": 1,
         "total_cortes": 1,
         "duracao_total_removida": 0.33,
     }
     assert payload["ignorados"]["por_motivo"] == {"baixa_confianca": 1}
     assert payload["ocorrencias"][0]["corte_id"] == 1
+    assert payload["ocorrencias"][0]["token_indexes"] == [3]

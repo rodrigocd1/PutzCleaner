@@ -17,6 +17,7 @@ from cutter import (
     _clamp_interval,
     _confidence_reason,
     _merge_candidates,
+    _video_encoder_args,
     build_cut_plan,
     compute_output_paths,
 )
@@ -80,6 +81,7 @@ def test_build_cut_plan_creates_safe_cut_and_keeps() -> None:
     assert len(plan.occurrences) == 1
     assert len(plan.cuts) == 1
     assert plan.occurrences[0].normalized_term == "né"
+    assert plan.occurrences[0].token_indexes == (1,)
     assert plan.cuts[0].start == 0.95
     assert plan.cuts[0].end == 1.28
     assert plan.keeps == (
@@ -204,3 +206,55 @@ def test_build_cut_plan_refines_boundaries_with_silence_profile() -> None:
     assert len(plan.occurrences) == 1
     assert plan.occurrences[0].candidate_start == 0.86
     assert plan.occurrences[0].candidate_end == 1.3
+
+
+def test_build_cut_plan_matches_phrase_term() -> None:
+    words = [
+        _word("isso", 0.0, 0.2, normalized="isso"),
+        _word("tipo", 0.5, 0.7, normalized="tipo"),
+        _word("assim", 0.75, 1.0, normalized="assim"),
+        _word("mesmo", 1.4, 1.8, normalized="mesmo"),
+    ]
+
+    plan = build_cut_plan(words, ["tipo assim"], 3.0, 0.05, 0.08, 0.6)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].configured_term == "tipo assim"
+    assert plan.occurrences[0].recognized_text == "tipo assim"
+    assert plan.occurrences[0].token_indexes == (1, 2)
+
+
+def test_build_cut_plan_marks_incomplete_phrase_as_ignored() -> None:
+    words = [
+        _word("tipo", 0.5, 0.7, normalized="tipo"),
+        _word("coisa", 0.75, 1.0, normalized="coisa"),
+    ]
+
+    plan = build_cut_plan(words, ["tipo assim"], 2.0, 0.05, 0.08, 0.6)
+
+    assert not plan.occurrences
+    assert len(plan.ignored) == 1
+    assert plan.ignored[0].reason == "frase_incompleta"
+
+
+def test_video_encoder_args_supports_cpu_and_nvenc() -> None:
+    assert _video_encoder_args("libx264") == [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+    ]
+    assert _video_encoder_args("h264_nvenc") == [
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p5",
+        "-rc",
+        "vbr",
+        "-cq",
+        "23",
+        "-b:v",
+        "0",
+    ]
