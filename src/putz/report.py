@@ -15,9 +15,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from .cutter import CutPlan, MediaInfo, RenderResult
+from .cutter import CutPlan, MediaInfo, RenderResult, clean_timeline_join_map
+from .removal_check import RemovalVerificationResult
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _round(value: float | None, digits: int = 3) -> float | None:
@@ -47,6 +48,7 @@ def build_report(
     cache_hit: bool = False,
     faster_whisper_version: str = "",
     ffmpeg_version: str = "",
+    verification_result: RemovalVerificationResult | None = None,
     warnings: list[str] | None = None,
     generated_at: datetime | None = None,
 ) -> dict[str, object]:
@@ -56,6 +58,7 @@ def build_report(
 
     # Mapa ocorrência -> corte_id e limites finais do corte.
     occurrence_cut: dict[int, tuple[int, float, float]] = {}
+    cut_join_map = clean_timeline_join_map(plan.cuts)
     for cut in plan.cuts:
         for occ_index in cut.occurrence_indexes:
             occurrence_cut[occ_index] = (cut.id, cut.start, cut.end)
@@ -63,6 +66,7 @@ def build_report(
     ocorrencias = []
     for i, occ in enumerate(plan.occurrences):
         cut_id, cut_start, cut_end = occurrence_cut.get(i, (None, None, None))
+        join_time = None if cut_id is None else cut_join_map.get(cut_id)
         ocorrencias.append(
             {
                 "palavra_removida": occ.configured_term,
@@ -78,6 +82,13 @@ def build_report(
                 "candidato_fim": _round(occ.candidate_end),
                 "corte_final_inicio": _round(cut_start),
                 "corte_final_fim": _round(cut_end),
+                "juncao_video_limpo": _round(join_time),
+                "margem_esquerda_efetiva": None
+                if cut_start is None
+                else _round(occ.word_start - cut_start),
+                "margem_direita_efetiva": None
+                if cut_end is None
+                else _round(cut_end - occ.word_end),
                 "quantidade_tokens": len(occ.token_indexes),
                 "classe_palavra": occ.word_class,
             }
@@ -89,6 +100,7 @@ def build_report(
             "inicio": _round(cut.start),
             "fim": _round(cut.end),
             "duracao": _round(cut.end - cut.start),
+            "juncao_video_limpo": _round(cut_join_map.get(cut.id)),
         }
         for cut in plan.cuts
     ]
@@ -109,6 +121,32 @@ def build_report(
         }
         for item in plan.ignored
     ]
+
+    verification_payload = {
+        "status": "nao_executada",
+        "modelo": "",
+        "dispositivo": "",
+        "detalhe": "",
+        "cortes": [],
+    }
+    if verification_result is not None:
+        verification_payload = {
+            "status": verification_result.status,
+            "modelo": verification_result.model_requested,
+            "dispositivo": verification_result.device_used,
+            "detalhe": verification_result.detail,
+            "cortes": [
+                {
+                    "corte_id": item.cut_id,
+                    "juncao_video_limpo": _round(item.join_time),
+                    "status": item.status,
+                    "termos_detectados": list(item.detected_terms),
+                    "transcricao_trecho": item.transcript_excerpt,
+                    "detalhe": item.detail,
+                }
+                for item in verification_result.cuts
+            ],
+        }
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -160,6 +198,7 @@ def build_report(
             "faster_whisper": faster_whisper_version,
             "ffmpeg": ffmpeg_version,
         },
+        "verificacao_remocao": verification_payload,
         "avisos": list(warnings or []),
     }
 
@@ -200,4 +239,3 @@ def write_report_staged(destination: Path, payload: Mapping[str, object]) -> Non
         except OSError:
             pass
         raise
-

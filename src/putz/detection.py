@@ -79,6 +79,8 @@ _LEXICAL_PROB_FLOOR = 0.55
 _LEXICAL_PROB_CEIL = 0.85
 
 MAX_PHRASE_GAP_SEC = 0.30
+BOUNDARY_PUNCTUATION = frozenset({",", ".", "?", "!", "…"})
+BOUNDARY_PAUSE_BONUS_SEC = 0.12
 
 REASON_CONTEXT_NOT_ISOLATED = "contexto_nao_isolado"
 REASON_PHRASE_INCOMPLETE = "frase_incompleta"
@@ -279,10 +281,22 @@ def context_block_reason(
     return None
 
 
+def has_boundary_punctuation(text: str) -> bool:
+    stripped = (text or "").rstrip()
+    return bool(stripped) and stripped[-1] in BOUNDARY_PUNCTUATION
+
+
+def pause_bonus_from_punctuation(text: str) -> float:
+    if has_boundary_punctuation(text):
+        return BOUNDARY_PAUSE_BONUS_SEC
+    return 0.0
+
+
 def glued_low_confidence_reason(
     probability: float | None,
     gap_before: float,
     gap_after: float,
+    punctuated_boundary: bool = False,
 ) -> str | None:
     """Rejeita matches de baixa confianca totalmente colados na fala.
 
@@ -292,6 +306,8 @@ def glued_low_confidence_reason(
     """
 
     if probability is None:
+        return None
+    if punctuated_boundary:
         return None
     if (
         probability < LOW_CONFIDENCE_GLUED_PROB

@@ -37,8 +37,15 @@ from .detection import (
     glued_low_confidence_reason,
     max_duration_for_class,
     min_probability_for_class,
+    pause_bonus_from_punctuation,
 )
-from .audio_analysis import AudioProfile, plan_cut_bounds
+from .audio_analysis import (
+    AudioProfile,
+    MAX_NEIGHBOR_INVASION_FRACTION,
+    MAX_NEIGHBOR_INVASION_SEC,
+    MIN_EFFECTIVE_MARGIN_SEC,
+    plan_cut_bounds,
+)
 from .transcriber import (
     EPSILON,
     MAX_SEGMENT_NO_SPEECH,
@@ -192,6 +199,17 @@ class RenderResult:
     render_mode: str = "render"
 
 
+def clean_timeline_join_map(cuts: Sequence[CutInterval]) -> dict[int, float]:
+    """Tempo de cada juncao no vídeo limpo, indexado por ``cut.id``."""
+
+    removed_so_far = 0.0
+    result: dict[int, float] = {}
+    for cut in cuts:
+        result[cut.id] = max(0.0, cut.start - removed_so_far)
+        removed_so_far += cut.end - cut.start
+    return result
+
+
 # ===========================================================================
 # PARTE 1 — LÓGICA PURA DE CORTES (seções 15 e 16)
 # ===========================================================================
@@ -305,6 +323,8 @@ def _protected_overlap_forbidden(
     protected_end: float,
     aggressive_before: bool,
     aggressive_after: bool,
+    allow_left_invasion: bool,
+    allow_right_invasion: bool,
 ) -> bool:
     candidate_overlap = _intervals_overlap(
         candidate_start, candidate_end, protected_start, protected_end
@@ -316,11 +336,49 @@ def _protected_overlap_forbidden(
     )
     if core_overlap > EPSILON:
         return True
+    overlap_allowed = min(
+        MAX_NEIGHBOR_INVASION_SEC,
+        max(0.0, protected_end - protected_start) * MAX_NEIGHBOR_INVASION_FRACTION,
+    )
+    if (
+        allow_left_invasion
+        and protected_end <= word_start + EPSILON
+        and candidate_overlap <= overlap_allowed + EPSILON
+    ):
+        return False
+    if (
+        allow_right_invasion
+        and protected_start >= word_end - EPSILON
+        and candidate_overlap <= overlap_allowed + EPSILON
+    ):
+        return False
     if aggressive_before and protected_end <= word_start + EPSILON:
         return False
     if aggressive_after and protected_start >= word_end - EPSILON:
         return False
     return True
+
+
+def _nearest_previous_protected(
+    protected: Sequence[tuple[float, float]], instant: float
+) -> tuple[float, float] | None:
+    best: tuple[float, float] | None = None
+    for start, end in protected:
+        if end <= instant + EPSILON:
+            if best is None or end > best[1]:
+                best = (start, end)
+    return best
+
+
+def _nearest_next_protected(
+    protected: Sequence[tuple[float, float]], instant: float
+) -> tuple[float, float] | None:
+    best: tuple[float, float] | None = None
+    for start, end in protected:
+        if start >= instant - EPSILON:
+            if best is None or start < best[0]:
+                best = (start, end)
+    return best
 
 
 def build_cut_plan(
@@ -414,6 +472,7 @@ def build_cut_plan(
         pause_after = _effective_pause(
             audio_profile, target.word_end, target.word_end + gap_after, gap_after
         )
+        pause_after += pause_bonus_from_punctuation(target.tokens[-1].token.text)
 
         # Cadeia de validação v2 (plano §3): contexto → limiar por classe →
         # plausibilidade de duração → baixa confiança colada na fala.
@@ -427,7 +486,13 @@ def build_cut_plan(
                 reason = REASON_DURATION_IMPLAUSIBLE
         if reason is None and target.word_class == WORD_CLASS_FILLER:
             reason = glued_low_confidence_reason(
-                target.probability, gap_before, gap_after
+                target.probability,
+                gap_before,
+                gap_after,
+                punctuated_boundary=pause_bonus_from_punctuation(
+                    target.tokens[-1].token.text
+                )
+                > 0.0,
             )
 
         if reason is None:
@@ -460,17 +525,20 @@ def build_cut_plan(
             continue
 
         # Limites impostos pelas vizinhas protegidas (invariante v1).
-        limit_start = 0.0
-        if not aggressive_before:
-            for ps, pe in protected:
-                if pe <= word_start + EPSILON and pe > limit_start:
-                    limit_start = pe
-                # protected está ordenado por start; não dá para parar cedo pelo end.
-        limit_end = td
-        if not aggressive_after:
-            for ps, pe in protected:
-                if ps >= word_end - EPSILON and ps < limit_end:
-                    limit_end = ps
+        prev_protected = _nearest_previous_protected(protected, word_start)
+        next_protected = _nearest_next_protected(protected, word_end)
+        limit_start = prev_protected[1] if prev_protected is not None and not aggressive_before else 0.0
+        limit_end = next_protected[0] if next_protected is not None and not aggressive_after else td
+        gap_before = (
+            float("inf")
+            if prev_protected is None
+            else max(0.0, word_start - prev_protected[1])
+        )
+        gap_after = (
+            float("inf")
+            if next_protected is None
+            else max(0.0, next_protected[0] - word_end)
+        )
 
         # Bordas guiadas pelo áudio real: estende para dentro do silêncio
         # retendo micro-pausa, ou encosta no mínimo local de energia.
@@ -482,6 +550,16 @@ def build_cut_plan(
             limit_start=limit_start,
             limit_end=min(limit_end, td),
             audio_profile=audio_profile,
+            left_neighbor_start=None if prev_protected is None else prev_protected[0],
+            left_neighbor_end=None if prev_protected is None else prev_protected[1],
+            right_neighbor_start=None if next_protected is None else next_protected[0],
+            right_neighbor_end=None if next_protected is None else next_protected[1],
+            allow_left_invasion=(
+                not aggressive_before and gap_before < MIN_EFFECTIVE_MARGIN_SEC
+            ),
+            allow_right_invasion=(
+                not aggressive_after and gap_after < MIN_EFFECTIVE_MARGIN_SEC
+            ),
         )
         candidate_start = max(0.0, word_start - mb) if aggressive_before else refined_start
         candidate_end = min(td, word_end + ma) if aggressive_after else refined_end
@@ -506,6 +584,8 @@ def build_cut_plan(
                 pe,
                 aggressive_before,
                 aggressive_after,
+                not aggressive_before and gap_before < MIN_EFFECTIVE_MARGIN_SEC,
+                not aggressive_after and gap_after < MIN_EFFECTIVE_MARGIN_SEC,
             )
             for ps, pe in protected
         ):
@@ -1876,4 +1956,3 @@ def compute_output_paths(
     report = output_dir / f"{stem}_limpo_relatorio.json"
     transcript = output_dir / f"{stem}_limpo_transcricao.txt"
     return video, report, transcript
-

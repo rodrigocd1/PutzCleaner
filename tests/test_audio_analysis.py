@@ -9,6 +9,7 @@ import pytest
 
 from putz.audio_analysis import (
     AudioProfile,
+    MIN_EFFECTIVE_MARGIN_SEC,
     SilenceSpan,
     analyze_wav,
     plan_cut_bounds,
@@ -132,6 +133,59 @@ def test_plan_cut_bounds_snaps_to_energy_minimum_without_adjacent_silence() -> N
     # Base seria 0.92; o vale mais proximo dentro de +/-0.03 e escolhido.
     assert 0.91 <= start <= 0.95
     assert rms[int(round(start / hop))] == -55.0
+
+
+def test_plan_cut_bounds_guarantees_minimum_margin_by_invading_glued_neighbor() -> None:
+    hop = 0.01
+    rms = [-24.0] * 400
+    rms[94] = -50.0
+    profile = AudioProfile(
+        silence_spans=(),
+        noise_floor_db=-60.0,
+        hop_sec=hop,
+        rms_db=tuple(rms),
+    )
+
+    start, end = plan_cut_bounds(
+        word_start=1.0,
+        word_end=1.2,
+        margin_before=0.02,
+        margin_after=0.02,
+        limit_start=1.0,
+        limit_end=1.22,
+        audio_profile=profile,
+        left_neighbor_start=0.82,
+        left_neighbor_end=1.0,
+        right_neighbor_start=1.22,
+        right_neighbor_end=1.42,
+        allow_left_invasion=True,
+        allow_right_invasion=True,
+    )
+
+    assert start == pytest.approx(0.94)
+    assert end == pytest.approx(1.26)
+    word_margin = 1.0 - start
+    assert word_margin == pytest.approx(MIN_EFFECTIVE_MARGIN_SEC)
+
+
+def test_plan_cut_bounds_invasion_respects_neighbor_fraction_cap() -> None:
+    profile = AudioProfile(silence_spans=(), noise_floor_db=-60.0)
+
+    start, _end = plan_cut_bounds(
+        word_start=1.0,
+        word_end=1.2,
+        margin_before=0.02,
+        margin_after=0.02,
+        limit_start=1.0,
+        limit_end=3.0,
+        audio_profile=profile,
+        left_neighbor_start=0.92,
+        left_neighbor_end=1.0,
+        allow_left_invasion=True,
+    )
+
+    # Vizinha de 80 ms -> invasao maxima de 32 ms (40%).
+    assert start == pytest.approx(0.968)
 
 
 def _write_wav(path: Path, pieces: list[tuple[float, float]], rate: int = 16000) -> None:

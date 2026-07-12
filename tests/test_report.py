@@ -66,7 +66,7 @@ def test_build_report_snapshot_like_payload() -> None:
         generated_at=datetime.fromisoformat("2026-07-11T21:45:00-03:00"),
     )
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["resumo"] == {
         "cache_transcricao": "hit",
         "total_ocorrencias": 1,
@@ -75,4 +75,9 @@ def test_build_report_snapshot_like_payload() -> None:
     }
     assert payload["ignorados"]["por_motivo"] == {"baixa_confianca": 1}
     assert payload["ocorrencias"][0]["corte_id"] == 1
+    assert payload["ocorrencias"][0]["juncao_video_limpo"] == 0.95
+    assert payload["ocorrencias"][0]["margem_esquerda_efetiva"] == 0.05
+    assert payload["ocorrencias"][0]["margem_direita_efetiva"] == 0.08
     assert payload["ocorrencias"][0]["token_indexes"] == [3]
+    assert payload["cortes"][0]["juncao_video_limpo"] == 0.95
+    assert payload["verificacao_remocao"]["status"] == "nao_executada"

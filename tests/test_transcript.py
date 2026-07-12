@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cutter import CutOccurrence
+from cutter import CutInterval, CutOccurrence
 from transcript import build_transcript
 from transcriber import WordToken
 
@@ -31,12 +31,13 @@ def test_build_transcript_marks_removed_word() -> None:
     transcript = build_transcript(
         words,
         occurrences,
+        [CutInterval(1, 0.35, 0.58, (0,))],
         input_name="entrada.mp4",
         model_label="small (small)",
         device_label="cpu",
     )
 
-    assert "né [removida 00:00:00.400]" in transcript
+    assert "né [removida -> vídeo limpo 00:00:00.350]" in transcript
     assert "Total de palavras removidas: 1" in transcript
 
 
@@ -52,11 +53,12 @@ def test_build_transcript_marks_all_words_from_phrase() -> None:
     transcript = build_transcript(
         words,
         occurrences,
+        [CutInterval(1, 0.35, 0.76, (0,))],
         input_name="entrada.mp4",
         model_label="small (small)",
         device_label="cpu",
     )
 
-    assert "tipo [removida 00:00:00.400]" in transcript
-    assert "assim [removida 00:00:00.550]" in transcript
+    assert "tipo [removida -> vídeo limpo 00:00:00.350]" in transcript
+    assert "assim [removida -> vídeo limpo 00:00:00.350]" in transcript
     assert "Total de palavras removidas: 2" in transcript

@@ -84,10 +84,10 @@ def test_build_cut_plan_creates_safe_cut_and_keeps() -> None:
     assert len(plan.cuts) == 1
     assert plan.occurrences[0].normalized_term == "né"
     assert plan.occurrences[0].token_indexes == (1,)
-    assert plan.cuts[0].start == 0.95
+    assert plan.cuts[0].start == 0.94
     assert plan.cuts[0].end == 1.28
     assert plan.keeps == (
-        KeepInterval(start=0.0, end=0.95),
+        KeepInterval(start=0.0, end=0.94),
         KeepInterval(start=1.28, end=3.0),
     )
 
@@ -210,6 +210,30 @@ def test_build_cut_plan_refines_boundaries_with_silence_profile() -> None:
     # depois — metade do silêncio disponível, limitado a 0.10).
     assert plan.occurrences[0].candidate_start == pytest.approx(0.87)
     assert plan.occurrences[0].candidate_end == pytest.approx(1.285)
+
+
+def test_build_cut_plan_steals_from_glued_neighbors_to_keep_minimum_margin() -> None:
+    words = [
+        _word("conhecimento", 0.7, 1.0, normalized="conhecimento"),
+        _word("né", 1.0, 1.2, normalized="né"),
+        _word("mesmo", 1.2, 1.5, normalized="mesmo"),
+    ]
+    hop = 0.01
+    rms = [-24.0] * 400
+    rms[94] = -50.0
+    rms[126] = -48.0
+    profile = AudioProfile(
+        silence_spans=(),
+        noise_floor_db=-60.0,
+        hop_sec=hop,
+        rms_db=tuple(rms),
+    )
+
+    plan = build_cut_plan(words, ["né"], 3.0, 0.02, 0.02, 0.6, audio_profile=profile)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].candidate_start == pytest.approx(0.94)
+    assert plan.occurrences[0].candidate_end == pytest.approx(1.26)
 
 
 def test_build_cut_plan_accepts_margins_above_recommended_limit() -> None:
@@ -369,6 +393,19 @@ def test_build_cut_plan_rejects_glued_low_confidence_filler() -> None:
     assert plan.ignored[0].reason == "baixa_confianca_sem_pausa"
 
 
+def test_build_cut_plan_accepts_punctuated_low_confidence_filler() -> None:
+    words = [
+        _word("você", 0.0, 0.3, normalized="você"),
+        _word("né,", 0.31, 0.45, normalized="né", probability=0.25),
+        _word("sabe", 0.46, 0.8, normalized="sabe"),
+    ]
+
+    plan = build_cut_plan(words, ["né"], 2.0, 0.02, 0.02, 0.1)
+
+    assert len(plan.occurrences) == 1
+    assert plan.ignored == ()
+
+
 def test_build_cut_plan_rejects_implausible_filler_duration() -> None:
     words = [
         _word("antes", 0.0, 0.4, normalized="antes"),
@@ -382,7 +419,7 @@ def test_build_cut_plan_rejects_implausible_filler_duration() -> None:
     assert plan.ignored[0].reason == "duracao_implausivel"
 
 
-def test_build_cut_plan_drops_cuts_below_minimum_duration() -> None:
+def test_build_cut_plan_expands_short_match_to_minimum_margin() -> None:
     words = [
         _word("antes", 0.5, 0.9, normalized="antes"),
         _word("né", 1.0, 1.05, normalized="né", probability=0.9),
@@ -391,10 +428,11 @@ def test_build_cut_plan_drops_cuts_below_minimum_duration() -> None:
 
     plan = build_cut_plan(words, ["né"], 3.0, 0.0, 0.0, 0.6)
 
-    assert not plan.occurrences
-    assert not plan.cuts
-    assert plan.ignored[0].reason == "corte_muito_curto"
-    assert plan.keeps == (KeepInterval(0.0, 3.0),)
+    assert len(plan.occurrences) == 1
+    assert len(plan.cuts) == 1
+    assert not plan.ignored
+    assert plan.cuts[0].start == pytest.approx(0.94)
+    assert plan.cuts[0].end == pytest.approx(1.11)
 
 
 def test_build_cut_plan_merges_cuts_separated_only_by_silence() -> None:

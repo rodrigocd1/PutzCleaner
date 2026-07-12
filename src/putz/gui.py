@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 from . import cutter
+from . import removal_check as removal_check_mod
 from . import report as report_mod
 from . import transcript as transcript_mod
 from .transcription_cache import CacheKey, TranscriptionCache
@@ -366,6 +367,7 @@ def run_worker(
     published_transcript = False
     cache = TranscriptionCache(project_root / "models" / ".transcription_cache")
     cache_hit = False
+    verification_result = None
 
     def log(msg: str) -> None:
         emit("log", msg)
@@ -542,6 +544,37 @@ def run_worker(
             )
             emit("progress", 97.0)
 
+            try:
+                verification_result = removal_check_mod.verify_removal(
+                    toolchain=toolchain,
+                    output_video=staged_video,
+                    output_duration=render_result.actual_duration,
+                    plan=plan,
+                    configured_terms=options.terms,
+                    transcriber=transcriber,
+                    cancel_event=cancel_event,
+                    work_dir=Path(work_dir),
+                    log_callback=log,
+                )
+                if verification_result.status == "residuo_detectado":
+                    residue_count = sum(
+                        1
+                        for item in verification_result.cuts
+                        if item.status == "residuo_detectado"
+                    )
+                    log(
+                        f"Verificação de remoção: resíduo detectado em {residue_count} corte(s)."
+                    )
+                elif verification_result.status == "ok":
+                    log("Verificação de remoção: sem resíduos detectados.")
+                elif verification_result is not None and verification_result.detail:
+                    log(
+                        "Verificação de remoção indisponível: "
+                        f"{verification_result.detail}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log(f"Verificação de remoção indisponível: {exc}")
+
         # ---- REPORTING (97-99%) ----
         emit("status", "Gerando relatório...")
         payload = report_mod.build_report(
@@ -564,6 +597,7 @@ def run_worker(
             cache_hit=cache_hit,
             faster_whisper_version=_faster_whisper_version(),
             ffmpeg_version=toolchain.ffmpeg_version,
+            verification_result=verification_result,
         )
         report_mod.write_report_staged(staged_report, payload)
 
@@ -571,6 +605,7 @@ def run_worker(
         transcript_text = transcript_mod.build_transcript(
             result.words,
             plan.occurrences,
+            plan.cuts,
             input_name=str(input_path),
             model_label=f"{result.model_requested} ({result.model_resolved})",
             device_label=result.device_used,
@@ -633,6 +668,17 @@ def run_worker(
                 str(final_report),
                 len(plan.occurrences),
                 len(plan.cuts),
+                media_info.timeline_duration,
+                render_result.actual_duration,
+                round(sum(cut.end - cut.start for cut in plan.cuts), 3),
+                None if verification_result is None else verification_result.status,
+                0
+                if verification_result is None
+                else sum(
+                    1
+                    for item in verification_result.cuts
+                    if item.status == "residuo_detectado"
+                ),
             )
         log(f"Transcrição: {final_transcript}")
 
@@ -1293,7 +1339,17 @@ class PutzCleanerApp:
         elif kind == "progress":
             self.progress.configure(value=float(payload[0]))
         elif kind == "success":
-            video_path, report_path, occurrences, cuts = payload
+            (
+                video_path,
+                report_path,
+                occurrences,
+                cuts,
+                original_duration,
+                output_duration,
+                removed_seconds,
+                verification_status,
+                residue_count,
+            ) = payload
             self._append_log(f"Vídeo: {video_path}")
             self._append_log(f"Relatório: {report_path}")
             self._last_video_path = video_path
@@ -1301,11 +1357,21 @@ class PutzCleanerApp:
             self._last_output_dir = str(Path(video_path).parent)
             self.open_output_button.configure(state="normal")
             self.open_report_button.configure(state="normal")
+            warning = ""
+            if verification_status == "residuo_detectado":
+                warning = (
+                    "\n\nAtenção: "
+                    f"{residue_count} de {cuts} corte(s) podem ter resíduo audível. "
+                    "Veja o relatório."
+                )
             messagebox.showinfo(
                 "PutzCleaner",
                 "Processamento concluído.\n\n"
+                f"Duração: {original_duration:.1f}s -> {output_duration:.1f}s "
+                f"({removed_seconds:.1f}s removidos em {cuts} cortes)\n\n"
                 f"Vídeo: {video_path}\n"
-                f"Relatório: {report_path}",
+                f"Relatório: {report_path}"
+                f"{warning}",
             )
         elif kind == "analysis_success":
             report_path, transcript_path, occurrences, cuts, removed_seconds = payload
@@ -1403,4 +1469,3 @@ class PutzCleanerApp:
             self.process_button.configure(state="disabled")
         else:
             self.root.destroy()
-

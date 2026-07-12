@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from putz.detection import (
+    BOUNDARY_PAUSE_BONUS_SEC,
     CONTEXT_ALWAYS,
     CONTEXT_ISOLATED,
     CONTEXT_ISOLATED_STRICT,
@@ -14,8 +15,10 @@ from putz.detection import (
     detect_match,
     fold_accents,
     glued_low_confidence_reason,
+    has_boundary_punctuation,
     has_repeated_run,
     min_probability_for_class,
+    pause_bonus_from_punctuation,
 )
 from transcriber import WordToken
 
@@ -112,5 +115,13 @@ def test_context_block_reason_by_mode() -> None:
 def test_glued_low_confidence_reason() -> None:
     assert glued_low_confidence_reason(0.25, 0.01, 0.02) == REASON_LOW_CONFIDENCE_GLUED
     assert glued_low_confidence_reason(0.25, 0.2, 0.01) is None
+    assert glued_low_confidence_reason(0.25, 0.01, 0.02, punctuated_boundary=True) is None
     assert glued_low_confidence_reason(0.5, 0.01, 0.01) is None
     assert glued_low_confidence_reason(None, 0.01, 0.01) is None
+
+
+def test_boundary_punctuation_helpers() -> None:
+    assert has_boundary_punctuation("né,")
+    assert not has_boundary_punctuation("né")
+    assert pause_bonus_from_punctuation("né?") == BOUNDARY_PAUSE_BONUS_SEC
+    assert pause_bonus_from_punctuation("tipo") == 0.0

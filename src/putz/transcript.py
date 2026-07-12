@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
-from .cutter import CutOccurrence
+from .cutter import CutInterval, CutOccurrence, clean_timeline_join_map
 from .transcriber import WordToken
 
 def _fmt_ts(seconds: float | None) -> str:
@@ -44,6 +44,7 @@ def _removed_word_indexes(
 def build_transcript(
     words: Sequence[WordToken],
     occurrences: Sequence[CutOccurrence],
+    cuts: Sequence[CutInterval],
     *,
     input_name: str,
     model_label: str,
@@ -52,6 +53,19 @@ def build_transcript(
     """Constrói o texto da transcrição com tempos e marcação de removidas."""
 
     removed = _removed_word_indexes(words, occurrences)
+    cut_join_map = clean_timeline_join_map(cuts)
+    occurrence_join_map: dict[int, float] = {}
+    for cut in cuts:
+        join_time = cut_join_map.get(cut.id, 0.0)
+        for occ_index in cut.occurrence_indexes:
+            occurrence_join_map[occ_index] = join_time
+    word_join_map: dict[int, float] = {}
+    for occ_index, occ in enumerate(occurrences):
+        join_time = occurrence_join_map.get(occ_index)
+        if join_time is None:
+            continue
+        for token_index in occ.token_indexes:
+            word_join_map[token_index] = join_time
 
     lines: list[str] = []
     lines.append("Transcrição do PutzCleaner")
@@ -61,6 +75,7 @@ def build_transcript(
         "As palavras seguidas de [removida] foram cortadas do vídeo limpo."
     )
     lines.append("Os tempos referem-se ao vídeo original.")
+    lines.append("Quando disponível, a marcação informa a junção no vídeo limpo.")
     lines.append("")
 
     if not words:
@@ -82,7 +97,13 @@ def build_transcript(
             if not text:
                 continue
             if idx in removed:
-                pieces.append(f"{text} [removida {_fmt_ts(word.start)}]")
+                clean_time = word_join_map.get(idx)
+                if clean_time is None:
+                    pieces.append(f"{text} [removida {_fmt_ts(word.start)}]")
+                else:
+                    pieces.append(
+                        f"{text} [removida -> vídeo limpo {_fmt_ts(clean_time)}]"
+                    )
             else:
                 pieces.append(text)
         prefix = f"[{_fmt_ts(seg_start)} -> {_fmt_ts(seg_end)}]"

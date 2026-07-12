@@ -32,6 +32,11 @@ SILENCE_ADJACENCY_SEC = 0.08
 RETAIN_SILENCE_BEFORE_SEC = 0.05
 RETAIN_SILENCE_AFTER_SEC = 0.10
 ENERGY_SNAP_RADIUS_SEC = 0.03
+MIN_EFFECTIVE_MARGIN_SEC = 0.06
+MAX_NEIGHBOR_INVASION_SEC = 0.08
+MAX_NEIGHBOR_INVASION_FRACTION = 0.40
+INVASION_SEARCH_BEFORE_SEC = 0.12
+INVASION_SEARCH_AFTER_SEC = 0.05
 
 
 @dataclass(frozen=True)
@@ -259,6 +264,12 @@ def plan_cut_bounds(
     limit_start: float,
     limit_end: float,
     audio_profile: AudioProfile | None,
+    left_neighbor_start: float | None = None,
+    left_neighbor_end: float | None = None,
+    right_neighbor_start: float | None = None,
+    right_neighbor_end: float | None = None,
+    allow_left_invasion: bool = False,
+    allow_right_invasion: bool = False,
 ) -> tuple[float, float]:
     """Decide as bordas do corte para um alvo aprovado.
 
@@ -271,17 +282,38 @@ def plan_cut_bounds(
       nem invade o nucleo do alvo.
     """
 
-    base_start = min(max(limit_start, word_start - margin_before, 0.0), word_start)
-    base_end = max(min(limit_end, word_end + margin_after), word_end)
+    effective_before = max(margin_before, MIN_EFFECTIVE_MARGIN_SEC)
+    effective_after = max(margin_after, MIN_EFFECTIVE_MARGIN_SEC)
+    base_start = min(max(limit_start, word_start - effective_before, 0.0), word_start)
+    base_end = max(min(limit_end, word_end + effective_after), word_end)
 
-    if audio_profile is None or not audio_profile.silence_spans:
-        return base_start, base_end
-
-    start = _plan_start_bound(
-        audio_profile, word_start, margin_before, limit_start, base_start
+    if audio_profile is None:
+        start = base_start
+        end = base_end
+    else:
+        start = _plan_start_bound(
+            audio_profile, word_start, effective_before, limit_start, base_start
+        )
+        end = _plan_end_bound(
+            audio_profile, word_end, effective_after, limit_end, base_end
+        )
+    start = _ensure_start_margin(
+        profile=audio_profile,
+        word_start=word_start,
+        limit_start=limit_start,
+        current_start=start,
+        neighbor_start=left_neighbor_start,
+        neighbor_end=left_neighbor_end,
+        allow_invasion=allow_left_invasion,
     )
-    end = _plan_end_bound(
-        audio_profile, word_end, margin_after, limit_end, base_end
+    end = _ensure_end_margin(
+        profile=audio_profile,
+        word_end=word_end,
+        limit_end=limit_end,
+        current_end=end,
+        neighbor_start=right_neighbor_start,
+        neighbor_end=right_neighbor_end,
+        allow_invasion=allow_right_invasion,
     )
     return start, end
 
@@ -341,3 +373,98 @@ def _plan_end_bound(
     lo = max(word_end, base_end - ENERGY_SNAP_RADIUS_SEC)
     hi = min(limit_end, base_end + ENERGY_SNAP_RADIUS_SEC)
     return profile.local_minimum_time(lo, hi, base_end)
+
+
+def _ensure_start_margin(
+    *,
+    profile: AudioProfile | None,
+    word_start: float,
+    limit_start: float,
+    current_start: float,
+    neighbor_start: float | None,
+    neighbor_end: float | None,
+    allow_invasion: bool,
+) -> float:
+    target_start = max(0.0, word_start - MIN_EFFECTIVE_MARGIN_SEC)
+    if current_start <= target_start:
+        return current_start
+    if target_start >= limit_start:
+        return _pick_start_time(profile, target_start, target_start, word_start)
+    if not allow_invasion or neighbor_start is None or neighbor_end is None:
+        return current_start
+    allowed = _allowed_invasion(neighbor_start, neighbor_end)
+    if allowed <= 0.0:
+        return current_start
+    floor = max(0.0, neighbor_end - allowed)
+    invaded_target = max(target_start, floor)
+    return _pick_start_time(
+        profile,
+        invaded_target,
+        floor,
+        min(word_start, neighbor_end + INVASION_SEARCH_AFTER_SEC),
+    )
+
+
+def _ensure_end_margin(
+    *,
+    profile: AudioProfile | None,
+    word_end: float,
+    limit_end: float,
+    current_end: float,
+    neighbor_start: float | None,
+    neighbor_end: float | None,
+    allow_invasion: bool,
+) -> float:
+    target_end = word_end + MIN_EFFECTIVE_MARGIN_SEC
+    if current_end >= target_end:
+        return current_end
+    if target_end <= limit_end:
+        return _pick_end_time(profile, target_end, word_end, target_end)
+    if not allow_invasion or neighbor_start is None or neighbor_end is None:
+        return current_end
+    allowed = _allowed_invasion(neighbor_start, neighbor_end)
+    if allowed <= 0.0:
+        return current_end
+    ceiling = neighbor_start + allowed
+    invaded_target = min(target_end, ceiling)
+    return _pick_end_time(
+        profile,
+        invaded_target,
+        max(word_end, neighbor_start - INVASION_SEARCH_AFTER_SEC),
+        ceiling,
+    )
+
+
+def _allowed_invasion(neighbor_start: float, neighbor_end: float) -> float:
+    duration = max(0.0, neighbor_end - neighbor_start)
+    if duration <= 0.0:
+        return 0.0
+    return min(MAX_NEIGHBOR_INVASION_SEC, duration * MAX_NEIGHBOR_INVASION_FRACTION)
+
+
+def _pick_start_time(
+    profile: AudioProfile | None,
+    target: float,
+    minimum: float,
+    boundary: float,
+) -> float:
+    if profile is None:
+        return max(minimum, min(target, boundary))
+    lo = max(minimum, boundary - INVASION_SEARCH_BEFORE_SEC, 0.0)
+    hi = min(boundary, boundary + INVASION_SEARCH_AFTER_SEC)
+    snapped = profile.local_minimum_time(lo, hi, target)
+    return max(minimum, min(snapped, boundary))
+
+
+def _pick_end_time(
+    profile: AudioProfile | None,
+    target: float,
+    boundary: float,
+    maximum: float,
+) -> float:
+    if profile is None:
+        return min(maximum, max(target, boundary))
+    lo = max(boundary, boundary - INVASION_SEARCH_AFTER_SEC)
+    hi = min(maximum, boundary + INVASION_SEARCH_BEFORE_SEC)
+    snapped = profile.local_minimum_time(lo, hi, target)
+    return min(maximum, max(snapped, boundary))
