@@ -63,6 +63,7 @@ def build_report(
             {
                 "palavra_removida": occ.configured_term,
                 "palavra_configurada": occ.configured_term,
+                "palavra_normalizada": occ.normalized_term,
                 "texto_reconhecido": occ.recognized_text,
                 "timestamp_inicial": _round(occ.word_start),
                 "timestamp_final": _round(occ.word_end),

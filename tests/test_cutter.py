@@ -78,6 +78,7 @@ def test_build_cut_plan_creates_safe_cut_and_keeps() -> None:
 
     assert len(plan.occurrences) == 1
     assert len(plan.cuts) == 1
+    assert plan.occurrences[0].normalized_term == "né"
     assert plan.cuts[0].start == 0.95
     assert plan.cuts[0].end == 1.28
     assert plan.keeps == (
@@ -155,3 +156,29 @@ def test_compute_output_paths_uses_expected_suffixes() -> None:
     assert video == Path("saida") / "entrada_limpo.mp4"
     assert report == Path("saida") / "entrada_limpo_relatorio.json"
     assert transcript == Path("saida") / "entrada_limpo_transcricao.txt"
+
+
+def test_build_cut_plan_treats_elongated_fillers_as_matches() -> None:
+    words = [
+        _word("nééé", 1.0, 1.25, normalized="nééé"),
+        _word("tchau", 1.5, 2.0, normalized="tchau"),
+    ]
+
+    plan = build_cut_plan(words, ["né"], 3.0, 0.05, 0.08, 0.6)
+
+    assert len(plan.occurrences) == 1
+    assert plan.occurrences[0].configured_term == "né"
+
+
+def test_build_cut_plan_keeps_lexical_tipo_without_pause_context() -> None:
+    words = [
+        _word("um", 0.0, 0.2, normalized="um"),
+        _word("tipo", 0.21, 0.5, normalized="tipo"),
+        _word("de", 0.51, 0.7, normalized="de"),
+    ]
+
+    plan = build_cut_plan(words, ["tipo"], 2.0, 0.05, 0.08, 0.6)
+
+    assert not plan.occurrences
+    assert len(plan.ignored) == 1
+    assert plan.ignored[0].reason == "contexto_nao_isolado"

@@ -25,7 +25,7 @@ def test_build_transcript_marks_removed_word() -> None:
         _word("tudo", "tudo", 0.6, 0.9, 0),
     ]
     occurrences = [
-        CutOccurrence("né", "né", 0.4, 0.5, 0.8, 0.35, 0.58),
+        CutOccurrence("né", "né", "né", 0.4, 0.5, 0.8, 0.35, 0.58),
     ]
 
     transcript = build_transcript(

@@ -29,7 +29,7 @@ def test_build_report_snapshot_like_payload() -> None:
     )
     plan = CutPlan(
         occurrences=(
-            CutOccurrence("né", "né", 1.0, 1.2, 0.91, 0.95, 1.28),
+            CutOccurrence("né", "né", "né", 1.0, 1.2, 0.91, 0.95, 1.28),
         ),
         ignored=(
             IgnoredOccurrence("assim", "assim", 2.0, 2.2, 0.3, "baixa_confianca"),

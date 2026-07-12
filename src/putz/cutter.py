@@ -23,6 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .detection import (
+    compile_term_specs,
+    detect_match,
+    lexical_context_reason,
+)
 from .transcriber import (
     EPSILON,
     MAX_SEGMENT_NO_SPEECH,
@@ -33,7 +38,6 @@ from .transcriber import (
     TIMESTAMP_TOLERANCE_SEC,
     WordToken,
     _sanitize_float,
-    normalize_token,
 )
 
 # ---------------------------------------------------------------------------
@@ -123,6 +127,7 @@ class IgnoredOccurrence:
 class CutOccurrence:
     configured_term: str
     recognized_text: str
+    normalized_term: str
     word_start: float
     word_end: float
     probability: float
@@ -274,12 +279,8 @@ def build_cut_plan(
     if minp is None or not (0.0 <= minp <= 1.0):
         raise CutterError("Limiar de confiança inválido; use um valor entre 0 e 1.")
 
-    targets: set[str] = set()
-    for term in configured_terms:
-        norm = normalize_token(term)
-        if norm:
-            targets.add(norm)
-    if not targets:
+    term_specs = compile_term_specs(configured_terms)
+    if not term_specs:
         raise CutterError("Nenhum termo válido para remover.")
 
     ignored: list[IgnoredOccurrence] = []
@@ -290,7 +291,7 @@ def build_cut_plan(
     for idx, token in enumerate(words):
         clamped = _clamp_interval(token.start, token.end, td)
         if isinstance(clamped, str):
-            if token.normalized in targets:
+            if detect_match(token, term_specs) is not None:
                 ignored.append(
                     IgnoredOccurrence(
                         text=token.text,
@@ -310,23 +311,41 @@ def build_cut_plan(
 
     # --- Classificar em alvos-candidatos e palavras protegidas ---
     # Protegidas: não-alvos válidos + alvos que falham no critério de confiança.
-    candidate_targets: list[_ValidToken] = []
+    candidate_targets: list[tuple[_ValidToken, str, str]] = []
     protected: list[tuple[float, float]] = []
 
-    for vt in valid_tokens:
-        is_target = vt.token.normalized in targets
-        if not is_target:
+    for index, vt in enumerate(valid_tokens):
+        match = detect_match(vt.token, term_specs)
+        if match is None:
             protected.append((vt.start, vt.end))
+            continue
+        context_reason = lexical_context_reason(
+            index=index,
+            valid_tokens=valid_tokens,
+            is_lexical=match.normalized_term in {"tipo", "assim"},
+        )
+        if context_reason is not None:
+            protected.append((vt.start, vt.end))
+            ignored.append(
+                IgnoredOccurrence(
+                    text=vt.token.text,
+                    normalized=match.normalized_term,
+                    start=vt.start,
+                    end=vt.end,
+                    probability=vt.token.probability,
+                    reason=context_reason,
+                )
+            )
             continue
         reason = _confidence_reason(vt.token, minp)
         if reason is None:
-            candidate_targets.append(vt)
+            candidate_targets.append((vt, match.configured_term, match.normalized_term))
         else:
             protected.append((vt.start, vt.end))
             ignored.append(
                 IgnoredOccurrence(
                     text=vt.token.text,
-                    normalized=vt.token.normalized,
+                    normalized=match.normalized_term,
                     start=vt.start,
                     end=vt.end,
                     probability=vt.token.probability,
@@ -339,7 +358,7 @@ def build_cut_plan(
     # --- 16.2 Avaliação dos alvos ---
     occurrences: list[CutOccurrence] = []
 
-    for vt in candidate_targets:
+    for vt, configured_term, normalized_term in candidate_targets:
         word_start, word_end = vt.start, vt.end
 
         # Item 12: núcleo não pode sobrepor palavra protegida.
@@ -392,8 +411,9 @@ def build_cut_plan(
 
         occurrences.append(
             CutOccurrence(
-                configured_term=vt.token.normalized,
+                configured_term=configured_term,
                 recognized_text=vt.token.text,
+                normalized_term=normalized_term,
                 word_start=word_start,
                 word_end=word_end,
                 probability=float(vt.token.probability),

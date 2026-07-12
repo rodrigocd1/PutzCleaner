@@ -45,7 +45,7 @@ def _removed_word_indexes(
         for i, word in enumerate(words):
             if i in removed:
                 continue
-            if word.normalized != occ.configured_term:
+            if word.normalized != occ.normalized_term:
                 continue
             if word.start is None or word.end is None:
                 continue
